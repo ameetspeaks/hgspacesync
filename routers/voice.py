@@ -67,13 +67,11 @@ async def chat_with_audio(
         ])
 
         # 6. Parse Response
-        clean_text = response.text.replace("```json", "").replace("```", "").strip()
-        try:
-            data = json.loads(clean_text)
-            return {"status": "success", "reply": data.get("reply")}
-        except:
-            return {"status": "success", "reply": response.text}
+        data = parse_ai_json(response.text, fallback={"reply": response.text})
+        return {"status": "success", "reply": data.get("reply", response.text)}
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Voice Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Voice Error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to process audio. Please try again.")
