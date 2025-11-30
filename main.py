@@ -13,6 +13,7 @@ from routers.voice import router as voice_router
 from routers.seo import router as seo_router # <--- NEW IMPORT
 from routers.resolutions import router as res_router # <--- NEW
 from routers.names import router as names_router # <--- NEW
+from routers.calculator import router as calculator_router # <--- NEW
 
 # --- LOGGING SETUP ---
 logging.basicConfig(level=logging.INFO)
@@ -60,6 +61,9 @@ app.include_router(seo_router, prefix="/api/seo", tags=["SEO Automation"])
 app.include_router(res_router, prefix="/api/resolutions", tags=["2026 Goals"])
 
 app.include_router(names_router, prefix="/api/names", tags=["Baby Names"])
+
+# 10. Calculators
+app.include_router(calculator_router, prefix="/api/birth-chart", tags=["Calculators"])
 
 @app.get("/")
 def health():
