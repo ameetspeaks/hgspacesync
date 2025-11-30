@@ -102,22 +102,36 @@ You are 'Jyotish AI', a Scholar-Grade Vedic Astrologer.
 @router.post("/ask")
 def chat_with_jyotish(req: ChatRequest):
     try:
-        # 1. GET CHART CONTEXT (DB or Calc)
+        # 1. GET CHART CONTEXT (DB or Calc) - Enhanced for personalization
         chart_context = ""
+        chart_details = {}
+        is_first_message = len(req.history) == 0
+        
         if req.user_id:
             db_res = safe_db_operation(
                 lambda: supabase.table("user_kundli_data")
-                    .select("ai_summary_text")
+                    .select("ai_summary_text, chart_data, ascendant_sign, moon_sign")
                     .eq("user_id", req.user_id)
                     .execute(),
                 "Failed to fetch chart from DB"
             )
             if db_res and db_res.data:
-                chart_context = db_res.data[0]['ai_summary_text']
+                chart_context = db_res.data[0].get('ai_summary_text', '')
+                chart_details = {
+                    'ascendant': db_res.data[0].get('ascendant_sign', ''),
+                    'moon_sign': db_res.data[0].get('moon_sign', ''),
+                    'chart_data': db_res.data[0].get('chart_data', [])
+                }
 
         if not chart_context:
             raw = calculate_birth_chart(req.dob, req.time, req.lat, req.lon, req.tz)
             chart_context = get_chart_summary(raw)
+            if isinstance(raw, dict):
+                chart_details = {
+                    'ascendant': raw.get('key_points', {}).get('ascendant', ''),
+                    'moon_sign': raw.get('key_points', {}).get('moon_sign', ''),
+                    'chart_data': raw.get('raw_json', [])
+                }
 
         # 2. GET DYNAMIC DATA (Transits & Scriptures)
         try:
@@ -140,32 +154,86 @@ def chat_with_jyotish(req: ChatRequest):
 
         chat = model.start_chat(history=gemini_history)
         
-        # 5. INJECT FULL CONTEXT
+        # 5. BUILD PERSONALIZED CONTEXT
+        personalization_context = ""
+        if chart_details:
+            if chart_details.get('moon_sign'):
+                personalization_context += f"\n- Moon Sign: {chart_details['moon_sign']} (emotional nature, inner self)"
+            if chart_details.get('ascendant'):
+                personalization_context += f"\n- Ascendant: {chart_details['ascendant']} (personality, how others see you)"
+            if chart_details.get('chart_data'):
+                # Extract dominant planets
+                planets = [p.get('planet', '') for p in chart_details['chart_data'] if isinstance(p, dict)]
+                if planets:
+                    personalization_context += f"\n- Key Planets: {', '.join(planets[:5])}"
+        
+        conversation_context = ""
+        if is_first_message:
+            conversation_context = "\n[CONVERSATION STATE: This is the FIRST message. You MUST greet the user warmly and personally, referencing their chart elements.]"
+        else:
+            conversation_context = f"\n[CONVERSATION STATE: This is message #{len(req.history) + 1}. Continue the conversation naturally, building on previous context.]"
+        
+        # 5. INJECT FULL CONTEXT WITH PERSONALIZATION
         full_prompt = f"""
-        [ASTROLOGICAL DATA]
-        User Chart: {chart_context}
-        Current Transits: {current_transits}
+        [CONVERSATION CONTEXT]
+        {conversation_context}
+        
+        [PERSONALIZATION DATA]
+        Chart Summary: {chart_context}
+        {personalization_context}
+        
+        [CURRENT ASTROLOGICAL INFLUENCES]
+        Transits: {current_transits}
         
         [KNOWLEDGE BASE]
-        Scripture Reference: {scripture_context}
+        Scripture Reference: {scripture_context if scripture_context else "None - use your knowledge"}
         
-        [USER SETTINGS]
+        [USER PREFERENCES]
         Target Language: {req.target_language}
         
-        [USER INPUT]
+        [USER'S MESSAGE]
         {req.current_message}
+        
+        [YOUR TASK]
+        Respond as a warm, empathetic, psychologically-aware astrologer. Personalize everything. Show you understand them as a person, not just a chart. Make them feel seen, heard, and guided.
         """
 
         # 6. GENERATE
         response = chat.send_message(full_prompt)
         
-        # 7. PARSE JSON
+        # 7. PARSE JSON AND ENHANCE RESPONSE
         data = parse_ai_json(
             response.text,
             fallback={"reply": response.text, "action_cards": []}
         )
         
-        return {"status": "success", "reply": data.get("reply"), "cards": data.get("action_cards", [])}
+        reply = data.get("reply", response.text)
+        action_cards = data.get("action_cards", [])
+        
+        # Post-process: Ensure first message has greeting if missing
+        if is_first_message and reply:
+            reply_lower = reply.lower()
+            greeting_indicators = ["namaste", "hello", "hi", "greetings", "welcome", "hey", "namaskar"]
+            has_greeting = any(indicator in reply_lower[:150] for indicator in greeting_indicators)
+            
+            if not has_greeting and chart_details.get('moon_sign'):
+                # Prepend a warm, personalized greeting
+                moon_sign = chart_details['moon_sign']
+                ascendant = chart_details.get('ascendant', '')
+                
+                if ascendant:
+                    greeting = f"Namaste! 🌙 I see your Moon in {moon_sign} and your Ascendant in {ascendant} - you're someone with a unique blend of emotional depth and outward expression. "
+                else:
+                    greeting = f"Namaste! 🌙 I see your Moon in {moon_sign} - you're someone who feels deeply and intuitively. "
+                
+                reply = greeting + reply
+        
+        return {
+            "status": "success", 
+            "reply": reply, 
+            "cards": action_cards,
+            "is_first_message": is_first_message
+        }
 
     except HTTPException:
         raise
