@@ -1,0 +1,17 @@
+fastapi
+uvicorn
+pyswisseph
+jyotishganit
+google-generativeai>=0.7.2
+python-dotenv
+sqlalchemy
+skyfield         
+psycopg2-binary
+requests
+supabase
+pydantic
+reportlab
+python-multipart
+yake
+tenacity
+openai
