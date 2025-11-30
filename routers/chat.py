@@ -43,29 +43,49 @@ def search_scriptures(query_text):
     Fails gracefully if feature is not enabled in DB.
     """
     try:
+        # Skip if query is too short or empty
+        if not query_text or len(query_text.strip()) < 3:
+            return ""
+        
         # Check if user wants RAG (Skip to save latency if not critical)
         # 1. Embed the user's question
-        embedding = genai.embed_content(
-            model="models/text-embedding-004",
-            content=query_text,
-            task_type="retrieval_query"
-        )
+        try:
+            embedding = genai.embed_content(
+                model="models/text-embedding-004",
+                content=query_text,
+                task_type="retrieval_query"
+            )
+            
+            if not embedding or 'embedding' not in embedding:
+                logger.warning("Failed to generate embedding for RAG search")
+                return ""
+        except Exception as embed_error:
+            logger.warning(f"Embedding generation failed: {embed_error}")
+            return ""
         
         # 2. RPC Call to Supabase (match_scriptures function)
-        res = supabase.rpc(
-            'match_scriptures', 
-            {
-                'query_embedding': embedding['embedding'], 
-                'match_threshold': 0.5, 
-                'match_count': 2
-            }
-        ).execute()
-        
-        if res.data:
-            return "\n".join([f"📖 [{item['source_book']}]: {item['content']}" for item in res.data])
-        return "No specific scripture citation found."
+        # This will fail gracefully if the function doesn't exist
+        try:
+            res = supabase.rpc(
+                'match_scriptures', 
+                {
+                    'query_embedding': embedding['embedding'], 
+                    'match_threshold': 0.5, 
+                    'match_count': 2
+                }
+            ).execute()
+            
+            if res and res.data:
+                return "\n".join([f"📖 [{item.get('source_book', 'Scripture')}]: {item.get('content', '')}" for item in res.data if item.get('content')])
+            return ""
+        except Exception as rpc_error:
+            # RPC function might not exist or table might not be set up
+            # This is expected and should not crash the chat
+            logger.debug(f"RAG RPC call failed (expected if not configured): {rpc_error}")
+            return ""
         
     except Exception as e:
+        # Catch-all for any unexpected errors
         # This is expected if the vector table/function doesn't exist yet.
         # We log a warning but DO NOT crash the chat.
         logger.warning(f"RAG Search skipped: {e}", exc_info=True)
@@ -137,11 +157,16 @@ def chat_with_jyotish(req: ChatRequest):
         try:
             current_transits = get_daily_transits() # From calc.py
         except Exception as e:
-            logger.warning(f"Failed to get transits: {e}")
+            logger.warning(f"Failed to get transits: {e}", exc_info=True)
             current_transits = "Planetary positions unavailable"
         
-        # Try RAG search (will return empty string if disabled)
-        scripture_context = search_scriptures(req.current_message)
+        # Try RAG search (will return empty string if disabled or fails)
+        # This should never crash the chat - it's optional
+        try:
+            scripture_context = search_scriptures(req.current_message)
+        except Exception as e:
+            logger.warning(f"Scripture search failed (non-critical): {e}", exc_info=True)
+            scripture_context = ""
 
         # 3. BUILD MODEL
         model = genai.GenerativeModel("gemini-2.0-flash", system_instruction=SYSTEM_INSTRUCTION)
