@@ -12,7 +12,7 @@ from routers.report import router as report_router
 from routers.voice import router as voice_router
 from routers.seo import router as seo_router # <--- Content rewriting
 from routers.seo_onpage import router as seo_onpage_router # <--- On-page SEO
-from routers.seo_tracking import router as seo_tracking_router # <--- SEO Tracking & Analytics
+# from routers.seo_tracking import router as seo_tracking_router # <--- SEO Tracking & Analytics (DISABLED - taking too much space)
 from routers.resolutions import router as res_router # <--- NEW
 from routers.names import router as names_router # <--- NEW
 from routers.calculator import router as calculator_router # <--- NEW
@@ -59,7 +59,7 @@ app.include_router(voice_router, prefix="/api/voice", tags=["Voice Chat"])
 # 8. SEO Automation
 app.include_router(seo_router, prefix="/api/seo", tags=["SEO Automation"])
 app.include_router(seo_onpage_router, prefix="/api/seo/onpage", tags=["On-Page SEO"])
-app.include_router(seo_tracking_router, prefix="/api/seo/tracking", tags=["SEO Tracking"])
+# app.include_router(seo_tracking_router, prefix="/api/seo/tracking", tags=["SEO Tracking"])  # DISABLED - taking too much space
 
 # 9.Resolutions
 app.include_router(res_router, prefix="/api/resolutions", tags=["2026 Goals"])
