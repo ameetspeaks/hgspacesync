@@ -241,9 +241,40 @@ def get_personalized_forecast_data(dob, time, lat, lon, tz):
 
 def calculate_birth_chart(dob, time, lat, lon, tz):
     try:
-        y,m,d = map(int, dob.split('-'))
-        h,mn = map(int, time.split(':'))
-        birth_dt = datetime(y, m, d, h, mn, tzinfo=timezone(timedelta(hours=float(tz))))
+        # Validate inputs
+        if not dob or not time:
+            raise ValueError("Date of birth and time are required")
+        
+        # Parse date
+        try:
+            y, m, d = map(int, dob.split('-'))
+            if not (1900 <= y <= 2100) or not (1 <= m <= 12) or not (1 <= d <= 31):
+                raise ValueError("Invalid date range")
+        except (ValueError, AttributeError) as e:
+            raise ValueError(f"Invalid date format. Use YYYY-MM-DD: {e}")
+        
+        # Parse time
+        try:
+            time_parts = time.split(':')
+            h = int(time_parts[0])
+            mn = int(time_parts[1]) if len(time_parts) > 1 else 0
+            if not (0 <= h <= 23) or not (0 <= mn <= 59):
+                raise ValueError("Invalid time range")
+        except (ValueError, AttributeError, IndexError) as e:
+            raise ValueError(f"Invalid time format. Use HH:MM: {e}")
+        
+        # Validate coordinates
+        try:
+            lat_f = float(lat)
+            lon_f = float(lon)
+            tz_f = float(tz)
+            if not (-90 <= lat_f <= 90) or not (-180 <= lon_f <= 180):
+                raise ValueError("Invalid coordinates")
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"Invalid location data: {e}")
+        
+        # Create birth datetime
+        birth_dt = datetime(y, m, d, h, mn, tzinfo=timezone(timedelta(hours=tz_f)))
         t = TS.from_datetime(birth_dt)
         
         chart = []
@@ -251,37 +282,63 @@ def calculate_birth_chart(dob, time, lat, lon, tz):
         asc_sign_id = int(sun_deg / 30) # Approx Ascendant
         
         for p in ["Sun", "Moon", "Mars", "Mercury", "Jupiter", "Venus", "Saturn"]:
-            deg = get_planet_long(p, t)
-            sign_id = int(deg / 30)
-            house = (sign_id - asc_sign_id) + 1
-            if house <= 0: house += 12
-            
-            # Calculate Divisionals
-            d9 = get_d9_sign(deg)
-            d16 = get_d16_sign(deg)
-            
-            chart.append({
-                "planet": p, 
-                "sign": SIGNS[sign_id], 
-                "d9_sign": SIGNS[d9],
-                "d16_sign": SIGNS[d16],
-                "house": house, 
-                "degree": round(deg % 30, 2), 
-                "abs_degree": deg
-            })
-            
+            try:
+                deg = get_planet_long(p, t)
+                sign_id = int(deg / 30)
+                if sign_id < 0 or sign_id >= len(SIGNS):
+                    sign_id = 0  # Fallback to Aries
+                
+                house = (sign_id - asc_sign_id) + 1
+                if house <= 0: house += 12
+                if house > 12: house -= 12
+                
+                # Calculate Divisionals
+                d9 = get_d9_sign(deg)
+                d16 = get_d16_sign(deg)
+                
+                chart.append({
+                    "planet": p, 
+                    "sign": SIGNS[sign_id], 
+                    "d9_sign": SIGNS[d9] if 0 <= d9 < len(SIGNS) else SIGNS[0],
+                    "d16_sign": SIGNS[d16] if 0 <= d16 < len(SIGNS) else SIGNS[0],
+                    "house": house, 
+                    "degree": round(deg % 30, 2), 
+                    "abs_degree": deg
+                })
+            except Exception as planet_error:
+                logger.warning(f"Error calculating {p}: {planet_error}")
+                continue
+        
+        if not chart:
+            raise ValueError("Failed to calculate any planetary positions")
+        
         # Vimshottari Dasha
         moon_obj = next((c for c in chart if c['planet']=='Moon'), None)
-        dasha = calculate_vimshottari(moon_obj['abs_degree'], birth_dt) if moon_obj else []
+        dasha = []
+        if moon_obj:
+            try:
+                dasha = calculate_vimshottari(moon_obj['abs_degree'], birth_dt)
+            except Exception as dasha_error:
+                logger.warning(f"Dasha calculation failed: {dasha_error}")
+
+        moon_sign = next((c['sign'] for c in chart if c['planet']=='Moon'), SIGNS[0])
+        ascendant = SIGNS[asc_sign_id] if 0 <= asc_sign_id < len(SIGNS) else SIGNS[0]
 
         return {
             "ai_summary": ". ".join([f"{c['planet']} in {c['sign']} ({c['house']}H)" for c in chart]),
             "raw_json": chart,
             "dasha_timeline": dasha,
-            "key_points": {"ascendant": SIGNS[asc_sign_id], "moon_sign": next(c['sign'] for c in chart if c['planet']=='Moon')}
+            "key_points": {
+                "ascendant": ascendant,
+                "moon_sign": moon_sign
+            }
         }
+    except ValueError as ve:
+        # Re-raise ValueError with clear message
+        raise ve
     except Exception as e:
-        return {"ai_summary": f"Error: {e}", "raw_json": [], "key_points": {"moon_sign": "Aries"}}
+        logger.error(f"Chart calculation error: {e}", exc_info=True)
+        raise ValueError(f"Failed to calculate birth chart: {str(e)}")
 
 def get_naming_details(dob, time, lat, lon, tz):
     try:

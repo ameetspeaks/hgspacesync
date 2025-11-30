@@ -144,14 +144,45 @@ def chat_with_jyotish(req: ChatRequest):
                 }
 
         if not chart_context:
-            raw = calculate_birth_chart(req.dob, req.time, req.lat, req.lon, req.tz)
-            chart_context = get_chart_summary(raw)
-            if isinstance(raw, dict):
+            try:
+                raw = calculate_birth_chart(req.dob, req.time, req.lat, req.lon, req.tz)
+                
+                # Validate chart result
+                if not raw or not isinstance(raw, dict):
+                    logger.error(f"Invalid chart result type: {type(raw)}")
+                    raise ValueError("Failed to calculate birth chart")
+                
+                # Check if calculation had an error
+                if "Error:" in str(raw.get('ai_summary', '')):
+                    error_msg = raw.get('ai_summary', 'Invalid birth data')
+                    logger.error(f"Chart calculation error: {error_msg}")
+                    raise ValueError(error_msg)
+                
+                # Extract chart context safely
+                chart_context = get_chart_summary(raw)
+                
+                # Extract chart details safely
+                key_points = raw.get('key_points', {})
                 chart_details = {
-                    'ascendant': raw.get('key_points', {}).get('ascendant', ''),
-                    'moon_sign': raw.get('key_points', {}).get('moon_sign', ''),
+                    'ascendant': key_points.get('ascendant', ''),
+                    'moon_sign': key_points.get('moon_sign', ''),
                     'chart_data': raw.get('raw_json', [])
                 }
+                
+            except ValueError as ve:
+                # Invalid birth data - return user-friendly error
+                logger.error(f"Chart calculation failed: {ve}", exc_info=True)
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Invalid birth data. Please check your date, time, and location. {str(ve)}"
+                )
+            except Exception as e:
+                # Unexpected error in chart calculation
+                logger.error(f"Unexpected error calculating chart: {e}", exc_info=True)
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to calculate birth chart. Please verify your birth details and try again."
+                )
 
         # 2. GET DYNAMIC DATA (Transits & Scriptures)
         try:
