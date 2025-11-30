@@ -7,6 +7,7 @@ from pydantic import BaseModel, field_validator
 from supabase import create_client, Client
 import google.generativeai as genai
 from calc import get_daily_transits, get_personalized_forecast_data, get_remedy_library
+from utils import parse_ai_json, safe_db_operation, format_error_response
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -78,17 +79,30 @@ def get_personal_horoscope(req: PersonalHoroscopeRequest):
 
         # 1. CHECK DB CACHE
         if not is_guest:
-            try:
-                db_check = supabase.table("daily_predictions_log").select("full_prediction_json").eq("user_id", req.user_id).eq("date", today_str).execute()
-                if db_check.data and len(db_check.data) > 0:
-                    logger.info("✅ Returning Cached Horoscope")
+            db_check = safe_db_operation(
+                lambda: supabase.table("daily_predictions_log")
+                    .select("full_prediction_json")
+                    .eq("user_id", req.user_id)
+                    .eq("date", today_str)
+                    .execute(),
+                "Cache check failed"
+            )
+            if db_check and db_check.data and len(db_check.data) > 0:
+                logger.info("✅ Returning Cached Horoscope")
+                try:
                     transit_data = get_personalized_forecast_data(req.dob, req.time, req.lat, req.lon, req.tz)
-                    return {"status": "success", "data": db_check.data[0]['full_prediction_json'], "transits": transit_data}
-            except Exception as e:
-                logger.warning(f"Cache check failed: {e}")
+                except Exception as e:
+                    logger.warning(f"Failed to get transits: {e}")
+                    transit_data = []
+                return {"status": "success", "data": db_check.data[0]['full_prediction_json'], "transits": transit_data}
 
         # 2. CALCULATE MATH
-        transit_data = get_personalized_forecast_data(req.dob, req.time, req.lat, req.lon, req.tz)
+        try:
+            transit_data = get_personalized_forecast_data(req.dob, req.time, req.lat, req.lon, req.tz)
+        except Exception as e:
+            logger.warning(f"Failed to calculate transits: {e}")
+            transit_data = []
+        
         remedy_lib = get_remedy_library()
         transit_context = "\n".join([t['description'] for t in transit_data]) if transit_data else "Planetary energy is stable today."
 
@@ -114,31 +128,33 @@ def get_personal_horoscope(req: PersonalHoroscopeRequest):
         model = genai.GenerativeModel("gemini-2.0-flash")
         response = model.generate_content(prompt)
         
-        try:
-            clean_text = response.text.replace("```json", "").replace("```", "").strip()
-            data = json.loads(clean_text)
-        except:
-            data = {
+        data = parse_ai_json(
+            response.text,
+            fallback={
                 "headline": "Aligning with the Cosmos",
                 "challenge": "Stay balanced today.",
                 "modern_solution": {"title": "Breathe", "action": "Deep Breathing", "why": "Focus"},
                 "traditional_solution": {"title": "Pray", "action": "Chant Om", "why": "Peace"},
                 "power_score": 50
             }
+        )
         
         if not is_guest:
-            try:
-                supabase.table("daily_predictions_log").insert({
+            safe_db_operation(
+                lambda: supabase.table("daily_predictions_log").insert({
                     "user_id": req.user_id, "date": today_str, "full_prediction_json": data,
                     "dominant_transit": data.get("dominant_transit", "General"), "power_score": data.get("power_score", 50)
-                }).execute()
-            except: pass
+                }).execute(),
+                "Failed to save horoscope to DB"
+            )
         
         return {"status": "success", "data": data, "transits": transit_data}
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Forecast Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Forecast Error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to generate horoscope. Please try again.")
 
 @router.get("/api/horoscope/{sign}")
 def get_horoscope(sign: str):
@@ -147,9 +163,17 @@ def get_horoscope(sign: str):
         raise HTTPException(status_code=400, detail="Invalid Zodiac Sign")
     
     today = get_ist_date()
-    res = supabase.table("daily_horoscopes").select("content").eq("date", today).eq("sign", sign.lower()).execute()
+    res = safe_db_operation(
+        lambda: supabase.table("daily_horoscopes")
+            .select("content")
+            .eq("date", today)
+            .eq("sign", sign.lower())
+            .execute(),
+        "Failed to fetch horoscope"
+    )
     
-    if res.data: return res.data[0]['content']
+    if res and res.data: 
+        return res.data[0]['content']
     
     # Fallback matching your specific format
     return {
@@ -197,16 +221,20 @@ def generate_daily_batch(x_admin_key: str = Header(None)):
             """
             try:
                 res = model_engine.generate_content(prompt)
-                content = json.loads(res.text.replace("```json", "").replace("```", "").strip())
+                content = parse_ai_json(res.text, fallback={})
                 
-                # Save row-by-row for each sign
-                supabase.table("daily_horoscopes").insert({
-                    "date": today, 
-                    "sign": sign, 
-                    "content": content
-                }).execute()
-                generated_count += 1
+                if content:
+                    # Save row-by-row for each sign
+                    safe_db_operation(
+                        lambda: supabase.table("daily_horoscopes").insert({
+                            "date": today, 
+                            "sign": sign, 
+                            "content": content
+                        }).execute(),
+                        f"Failed to save horoscope for {sign}"
+                    )
+                    generated_count += 1
             except Exception as e:
-                logger.error(f"Failed {sign}: {e}")
+                logger.error(f"Failed {sign}: {e}", exc_info=True)
 
     return {"status": "success", "generated": generated_count}

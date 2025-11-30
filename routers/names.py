@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 import google.generativeai as genai
 from calc import get_naming_details
+from utils import parse_ai_json
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ def generate_baby_names(req: NamingRequest):
         
         model = genai.GenerativeModel("gemini-2.0-flash")
         res = model.generate_content(prompt)
-        data = json.loads(res.text.replace("```json", "").replace("```", "").strip())
+        data = parse_ai_json(res.text, fallback={"vedic_analysis": "", "names": []})
         
         return {
             "status": "success",
@@ -72,6 +73,8 @@ def generate_baby_names(req: NamingRequest):
             "results": data
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Naming Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Naming Error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to generate names. Please try again.")

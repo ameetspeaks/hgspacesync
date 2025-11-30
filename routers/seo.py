@@ -38,7 +38,9 @@ def get_working_model():
             model = genai.GenerativeModel(name)
             model.generate_content("Test")
             return model
-        except: continue
+        except Exception as e:
+            logger.debug(f"Model {name} failed: {e}")
+            continue
     raise Exception("No working Gemini model found.")
 
 # --- HELPER FUNCTIONS ---
@@ -48,7 +50,9 @@ def extract_keywords(title, content, existing):
         text_sample = f"{title} {str(content)[:1000]}"
         keywords = kw_extractor.extract_keywords(text_sample)
         return ", ".join([k[0] for k in keywords[:3]])
-    except: return "general"
+    except Exception as e:
+        logger.warning(f"Keyword extraction failed: {e}")
+        return "general"
 
 def count_words(text):
     return len(str(text).split()) if text else 0
@@ -69,7 +73,9 @@ def process_json(data, keywords):
                 try:
                     data[k] = call_ai_rewrite(v, keywords, count_words(v))
                     time.sleep(2)
-                except Exception: pass
+                except Exception as e:
+                    logger.warning(f"Failed to rewrite field {k}: {e}")
+                    pass
             else: process_json(v, keywords)
     elif isinstance(data, list):
         for item in data: process_json(item, keywords)

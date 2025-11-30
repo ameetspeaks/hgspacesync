@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
 from supabase import create_client, Client
 from calc import get_detailed_panchang
+from utils import safe_db_operation
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -30,27 +31,38 @@ def get_panchang(req: PanchangRequest):
         r_lon = round(req.lon, 2)
 
         # DB Check
-        try:
-            res = supabase.table("daily_panchang_log").select("full_data").eq("date", date_str).eq("latitude", r_lat).eq("longitude", r_lon).execute()
-            if res.data: return {"status": "success", "data": res.data[0]['full_data']}
-        except: pass
+        res = safe_db_operation(
+            lambda: supabase.table("daily_panchang_log")
+                .select("full_data")
+                .eq("date", date_str)
+                .eq("latitude", r_lat)
+                .eq("longitude", r_lon)
+                .execute(),
+            "Failed to fetch panchang from cache"
+        )
+        if res and res.data: 
+            return {"status": "success", "data": res.data[0]['full_data']}
 
         # Calc
         data = get_detailed_panchang(target_date, req.lat, req.lon, req.tz)
         data['location']['name'] = req.city
 
         # Save
-        try:
-            supabase.table("daily_panchang_log").upsert({
+        safe_db_operation(
+            lambda: supabase.table("daily_panchang_log").upsert({
                 "date": date_str, "latitude": r_lat, "longitude": r_lon,
                 "location_name": req.city, "tithi_name": data['meta']['tithi'],
                 "nakshatra_name": data['meta']['nakshatra'], "full_data": data
-            }, on_conflict="date,latitude,longitude").execute()
-        except: pass
+            }, on_conflict="date,latitude,longitude").execute(),
+            "Failed to save panchang to DB"
+        )
 
         return {"status": "success", "data": data}
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Panchang Error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to calculate panchang. Please try again.")
 
 @router.post("/cron/generate")
 def cron_generate(x_admin_key: str = Header(None)):

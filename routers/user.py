@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
 from supabase import create_client, Client
 from calc import calculate_birth_chart
+from utils import validate_chart_result, safe_db_operation
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -37,8 +38,9 @@ def process_user_kundli(req: UserProfileRequest, x_admin_key: str = Header(None)
         # 2. Perform Heavy Calculation
         result = calculate_birth_chart(req.dob, req.time, req.lat, req.lon, req.tz)
         
-        if isinstance(result, str): # Handle error cases from calc.py
-            raise HTTPException(status_code=400, detail=result)
+        if not validate_chart_result(result):
+            error_msg = result if isinstance(result, str) else "Invalid birth data provided"
+            raise HTTPException(status_code=400, detail=error_msg)
 
         # 3. Save to Supabase
         data_payload = {
@@ -51,10 +53,18 @@ def process_user_kundli(req: UserProfileRequest, x_admin_key: str = Header(None)
         }
 
         # Upsert (Insert or Update)
-        res = supabase.table("user_kundli_data").upsert(data_payload).execute()
+        res = safe_db_operation(
+            lambda: supabase.table("user_kundli_data").upsert(data_payload).execute(),
+            "Failed to save kundli to DB"
+        )
+        
+        if not res:
+            raise HTTPException(status_code=500, detail="Failed to save kundli data")
         
         return {"status": "success", "data": "Kundli Processed and Saved"}
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Processing Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Processing Error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to process kundli. Please try again.")

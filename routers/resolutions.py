@@ -7,6 +7,7 @@ from pydantic import BaseModel
 import google.generativeai as genai
 from supabase import create_client, Client
 from calc import calculate_birth_chart, get_planet_habits_library
+from utils import parse_ai_json, validate_chart_result, safe_db_operation
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -47,11 +48,10 @@ def generate_resolution_options(req: ResolutionGenRequest):
         # 1. Calculate Chart
         chart = calculate_birth_chart(req.dob, req.time, req.lat, req.lon, req.tz)
         
-        # Handle dictionary return from calc.py
-        if isinstance(chart, dict):
-            chart_txt = chart['ai_summary']
-        else:
-            chart_txt = str(chart)
+        if not validate_chart_result(chart):
+            raise HTTPException(status_code=400, detail="Invalid birth data provided")
+        
+        chart_txt = chart.get('ai_summary', str(chart)) if isinstance(chart, dict) else str(chart)
         
         # 2. Get Habit Library
         habit_lib = get_planet_habits_library()
@@ -83,14 +83,18 @@ def generate_resolution_options(req: ResolutionGenRequest):
         res = model.generate_content(prompt)
         
         # Clean JSON
-        clean_text = res.text.replace("```json", "").replace("```", "").strip()
-        data = json.loads(clean_text)
+        data = parse_ai_json(res.text, fallback=[])
+        
+        if not isinstance(data, list):
+            data = []
         
         return {"status": "success", "options": data}
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Resolution Gen Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Resolution Gen Error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to generate resolutions. Please try again.")
 
 @router.post("/commit")
 def commit_to_sankalpa(req: CommitRequest):
@@ -107,17 +111,22 @@ def commit_to_sankalpa(req: CommitRequest):
         }
         
         # Save to DB
-        res = supabase.table("user_resolutions").insert(data).select().execute()
+        res = safe_db_operation(
+            lambda: supabase.table("user_resolutions").insert(data).select().execute(),
+            "Failed to save resolution to DB"
+        )
         
         # Handle Supabase response format safely
-        if res.data and len(res.data) > 0:
+        if res and res.data and len(res.data) > 0:
             return {"status": "success", "data": res.data[0]}
         else:
-            raise Exception("Failed to insert resolution")
+            raise HTTPException(status_code=500, detail="Failed to save resolution")
             
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Commit Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Commit Error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to commit resolution. Please try again.")
 
 @router.post("/check-in")
 def daily_check_in(req: CheckInRequest):
@@ -131,10 +140,20 @@ def daily_check_in(req: CheckInRequest):
             "checkin_date": today.isoformat(),
             "note": req.note
         }
-        supabase.table("resolution_logs").insert(log_data).execute()
+        safe_db_operation(
+            lambda: supabase.table("resolution_logs").insert(log_data).execute(),
+            "Failed to log check-in"
+        )
         
         # 2. Update Streak Logic
-        res_data = supabase.table("user_resolutions").select("*").eq("id", req.resolution_id).single().execute()
+        res_data = safe_db_operation(
+            lambda: supabase.table("user_resolutions").select("*").eq("id", req.resolution_id).single().execute(),
+            "Failed to fetch resolution"
+        )
+        
+        if not res_data or not res_data.data:
+            return {"status": "error", "message": "Resolution not found"}
+        
         curr = res_data.data
         
         new_streak = curr['current_streak']
@@ -151,11 +170,14 @@ def daily_check_in(req: CheckInRequest):
             new_streak = 1 # First check-in
             
         # Update Resolution Table
-        supabase.table("user_resolutions").update({
-            "current_streak": new_streak,
-            "total_completions": curr['total_completions'] + 1,
-            "last_checkin": today.isoformat()
-        }).eq("id", req.resolution_id).execute()
+        safe_db_operation(
+            lambda: supabase.table("user_resolutions").update({
+                "current_streak": new_streak,
+                "total_completions": curr['total_completions'] + 1,
+                "last_checkin": today.isoformat()
+            }).eq("id", req.resolution_id).execute(),
+            "Failed to update resolution streak"
+        )
         
         return {
             "status": "success", 
@@ -165,4 +187,5 @@ def daily_check_in(req: CheckInRequest):
 
     except Exception as e:
         # Likely a unique constraint violation (already checked in today)
+        logger.warning(f"Check-in error (likely duplicate): {e}")
         return {"status": "error", "message": "Already checked in today!"}
