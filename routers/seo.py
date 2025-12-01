@@ -46,7 +46,6 @@ class OptimizationRequest(BaseModel):
     batch_size: int = 5
     target_status: str = "completed"  # Only optimize articles that are already rewritten/completed
     run_sync: bool = False  # If True, runs synchronously (for testing). WARNING: Can timeout on large batches
-    run_sync: bool = False  # If True, runs synchronously (for testing). WARNING: Can timeout on large batches
 
 # --- MODEL HUNTER ---
 def get_working_model():
@@ -537,17 +536,14 @@ def trigger_seo_polish(
     
     Returns a batch_id that can be used to track progress.
     """
+    if x_admin_key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
     try:
-        if x_admin_key != ADMIN_SECRET:
-            raise HTTPException(status_code=403, detail="Unauthorized")
-        
         # Generate unique batch ID
         batch_id = str(uuid.uuid4())
         
-        # Get run_sync flag (defaults to False if not provided)
-        run_sync = getattr(req, 'run_sync', False)
-        
-        if run_sync:
+        if req.run_sync:
             # Run synchronously for immediate feedback (testing only)
             logger.info(f"🔄 Running optimization synchronously (testing mode) - Batch ID: {batch_id}")
             result = run_optimization_batch(batch_id, req.batch_size, req.target_status)
