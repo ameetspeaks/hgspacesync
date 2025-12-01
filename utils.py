@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 def parse_ai_json(text: str, fallback: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Safely parses AI-generated JSON response.
+    Handles markdown code blocks, control characters, and extracts JSON from mixed content.
     
     Args:
         text: Raw text response from AI
@@ -24,14 +25,60 @@ def parse_ai_json(text: str, fallback: Optional[Dict[str, Any]] = None) -> Dict[
     if fallback is None:
         fallback = {}
     
-    try:
-        clean_text = text.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean_text)
-    except json.JSONDecodeError as e:
-        logger.warning(f"JSON parse error: {e}. Text: {text[:100]}...")
+    if not text or not isinstance(text, str):
         return fallback
+    
+    import re
+    
+    try:
+        # Step 1: Remove markdown code blocks
+        clean_text = text.replace("```json", "").replace("```", "").strip()
+        
+        # Step 2: Try to extract JSON object if text contains extra content
+        # Find JSON object boundaries
+        json_start = clean_text.find('{')
+        json_end = clean_text.rfind('}')
+        
+        if json_start >= 0 and json_end > json_start:
+            # Extract just the JSON part
+            clean_text = clean_text[json_start:json_end + 1]
+        
+        # Step 3: Remove invalid control characters
+        # Control characters that are invalid in JSON (except when escaped in strings)
+        # We'll remove unescaped control characters, but keep valid whitespace
+        # This regex removes control characters except \n, \r, \t (which can be valid)
+        clean_text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', clean_text)
+        
+        # Step 4: Try to parse
+        return json.loads(clean_text)
+        
+    except json.JSONDecodeError as e:
+        # If parsing fails, try more aggressive cleaning
+        try:
+            # Try to find JSON object boundaries again with original text
+            json_start = text.find('{')
+            json_end = text.rfind('}')
+            
+            if json_start >= 0 and json_end > json_start:
+                json_text = text[json_start:json_end + 1]
+                
+                # Remove markdown
+                json_text = json_text.replace("```json", "").replace("```", "").strip()
+                
+                # Remove all control characters (more aggressive)
+                json_text = re.sub(r'[\x00-\x1F\x7F]', '', json_text)
+                
+                # Try parsing again
+                return json.loads(json_text)
+            
+            logger.warning(f"JSON parse error: {e}. Text sample: {text[:200]}...")
+        except Exception as e2:
+            logger.warning(f"JSON parse error (fallback also failed): {e2}. Text sample: {text[:200]}...")
+        
+        return fallback
+        
     except Exception as e:
-        logger.error(f"Unexpected error parsing JSON: {e}")
+        logger.error(f"Unexpected error parsing JSON: {e}", exc_info=True)
         return fallback
 
 
