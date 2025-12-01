@@ -412,6 +412,89 @@ def trigger_seo_polish(
     background_tasks.add_task(run_optimization_batch, req.batch_size, req.target_status)
     return {
         "status": "queued", 
-        "message": f"SEO optimization started. Processing {req.batch_size} articles with status '{req.target_status}'.",
+        "message": f"SEO optimization started. Processing {req.batch_size} articles with status '{req.target_status}'.", 
         "batch_size": req.batch_size
     }
+
+@router.get("/optimize-status")
+def get_seo_optimization_status(x_admin_key: str = Header(None)):
+    """
+    Get overall SEO optimization status across all articles.
+    Returns counts of optimized vs unoptimized articles.
+    """
+    if x_admin_key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    try:
+        # Try to get counts with seo_optimized column
+        try:
+            # Total articles
+            total_res = supabase.table("blog_posts").select("id", count="exact").execute()
+            total_count = total_res.count if hasattr(total_res, 'count') else len(total_res.data) if total_res.data else 0
+            
+            # Optimized articles
+            optimized_res = supabase.table("blog_posts").select("id", count="exact").eq("seo_optimized", True).execute()
+            optimized_count = optimized_res.count if hasattr(optimized_res, 'count') else len(optimized_res.data) if optimized_res.data else 0
+            
+            # Unoptimized articles (completed but not optimized)
+            unoptimized_res = supabase.table("blog_posts").select("id", count="exact").eq("rewrite_status", "completed").is_("seo_optimized", "null").execute()
+            unoptimized_count = unoptimized_res.count if hasattr(unoptimized_res, 'count') else len(unoptimized_res.data) if unoptimized_res.data else 0
+            
+            # Fallback: if seo_optimized column doesn't exist, count by rewrite_status
+            if optimized_count == 0 and unoptimized_count == 0:
+                completed_res = supabase.table("blog_posts").select("id", count="exact").eq("rewrite_status", "completed").execute()
+                completed_count = completed_res.count if hasattr(completed_res, 'count') else len(completed_res.data) if completed_res.data else 0
+                unoptimized_count = completed_count
+        except Exception as e:
+            logger.debug(f"Error querying seo_optimized column: {e}")
+            # Fallback to rewrite_status only
+            total_res = supabase.table("blog_posts").select("id", count="exact").execute()
+            total_count = total_res.count if hasattr(total_res, 'count') else len(total_res.data) if total_res.data else 0
+            
+            completed_res = supabase.table("blog_posts").select("id", count="exact").eq("rewrite_status", "completed").execute()
+            completed_count = completed_res.count if hasattr(completed_res, 'count') else len(completed_res.data) if completed_res.data else 0
+            
+            optimized_count = 0
+            unoptimized_count = completed_count
+        
+        return {
+            "total_articles": total_count,
+            "optimized": optimized_count,
+            "unoptimized": unoptimized_count,
+            "optimization_percentage": round((optimized_count / total_count * 100), 2) if total_count > 0 else 0,
+            "ready_for_optimization": unoptimized_count,
+            "note": "seo_optimized column exists" if optimized_count > 0 or unoptimized_count > 0 else "Using rewrite_status only (seo_optimized column may not exist)"
+        }
+    except Exception as e:
+        logger.error(f"Error getting SEO optimization status: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get status: {str(e)}")
+
+@router.get("/optimize-status/{article_id}")
+def get_article_seo_status(article_id: int, x_admin_key: str = Header(None)):
+    """
+    Get SEO optimization status for a specific article by ID.
+    """
+    if x_admin_key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    try:
+        res = supabase.table("blog_posts").select("id, slug, title, seo_optimized, rewrite_status, updated_at").eq("id", article_id).single().execute()
+        
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Article not found")
+        
+        article = res.data
+        return {
+            "id": article.get("id"),
+            "slug": article.get("slug"),
+            "title": article.get("title") or article.get("Title", "Untitled"),
+            "seo_optimized": article.get("seo_optimized", False),
+            "rewrite_status": article.get("rewrite_status"),
+            "last_updated": article.get("updated_at"),
+            "is_ready": article.get("rewrite_status") == "completed" and not article.get("seo_optimized", False)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting article SEO status: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get article status: {str(e)}")
