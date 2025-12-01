@@ -264,18 +264,27 @@ def run_optimization_batch(batch_size, target_status="completed"):
             logger.warning("⚠️ No sitemap context available. Continuing with empty context.")
         
         # 2. Fetch Candidates - Articles that need optimization
-        # Check if seo_optimized column exists by trying to query it
-        # If it doesn't exist, we'll use rewrite_status as a fallback
-        try:
-            # Try to query with seo_optimized filter
+        # First, check how many articles match our criteria
+        logger.info(f"🔍 Searching for articles with rewrite_status='{target_status}'...")
+        
+        # Try to check if seo_optimized column exists by querying one article
+        test_query = supabase.table("blog_posts").select("id, seo_optimized").limit(1).execute()
+        has_seo_column = test_query.data and len(test_query.data) > 0 and 'seo_optimized' in test_query.data[0]
+        
+        logger.info(f"📊 seo_optimized column exists: {has_seo_column}")
+        
+        # Build query based on whether column exists
+        if has_seo_column:
+            # Query with seo_optimized filter
+            logger.info("🔍 Querying with seo_optimized filter...")
             response = supabase.table("blog_posts")\
                 .select("*")\
                 .eq("rewrite_status", target_status)\
-                .is_("seo_optimized", "null")\
+                .or_("seo_optimized.is.null,seo_optimized.eq.false")\
                 .limit(batch_size)\
                 .execute()
-        except Exception as e:
-            # If seo_optimized column doesn't exist, use rewrite_status only
+        else:
+            # If column doesn't exist, use rewrite_status only
             logger.info("⚠️ seo_optimized column not found. Using rewrite_status filter only.")
             response = supabase.table("blog_posts")\
                 .select("*")\
@@ -285,9 +294,29 @@ def run_optimization_batch(batch_size, target_status="completed"):
         
         rows = response.data if response else []
         
+        logger.info(f"📝 Query returned {len(rows)} articles")
+        
         if not rows:
+            # Log why no articles were found
+            total_completed = supabase.table("blog_posts")\
+                .select("id", count="exact")\
+                .eq("rewrite_status", target_status)\
+                .execute()
+            total_count = total_completed.count if hasattr(total_completed, 'count') else len(total_completed.data) if total_completed.data else 0
+            
+            if has_seo_column:
+                optimized_count = supabase.table("blog_posts")\
+                    .select("id", count="exact")\
+                    .eq("rewrite_status", target_status)\
+                    .eq("seo_optimized", True)\
+                    .execute()
+                opt_count = optimized_count.count if hasattr(optimized_count, 'count') else len(optimized_count.data) if optimized_count.data else 0
+                logger.info(f"ℹ️ Found {total_count} articles with status '{target_status}', {opt_count} already optimized")
+            else:
+                logger.info(f"ℹ️ Found {total_count} articles with status '{target_status}'")
+            
             logger.info("✅ No unoptimized articles found.")
-            return {"status": "done", "message": "No articles to optimize", "processed": 0}
+            return {"status": "done", "message": "No articles to optimize", "processed": 0, "total_available": total_count}
         
         logger.info(f"📝 Found {len(rows)} articles to optimize")
         
@@ -405,16 +434,34 @@ def trigger_seo_polish(
     """
     Triggers SEO optimization batch job.
     Adds internal links, image alt text, and JSON-LD schema to blog articles.
+    
+    Args:
+        req: Optimization request with batch_size and target_status
+        background_tasks: FastAPI background tasks
+        x_admin_key: Admin authentication key
+        run_sync: If True, runs synchronously (for testing). Default: False (async)
     """
     if x_admin_key != ADMIN_SECRET:
         raise HTTPException(status_code=403, detail="Unauthorized")
     
-    background_tasks.add_task(run_optimization_batch, req.batch_size, req.target_status)
-    return {
-        "status": "queued", 
-        "message": f"SEO optimization started. Processing {req.batch_size} articles with status '{req.target_status}'.", 
-        "batch_size": req.batch_size
-    }
+    if req.run_sync:
+        # Run synchronously for immediate feedback (testing only)
+        logger.info("🔄 Running optimization synchronously (testing mode)")
+        result = run_optimization_batch(req.batch_size, req.target_status)
+        return {
+            "status": "completed",
+            "message": f"SEO optimization completed synchronously.",
+            "result": result
+        }
+    else:
+        # Run asynchronously (production)
+        background_tasks.add_task(run_optimization_batch, req.batch_size, req.target_status)
+        return {
+            "status": "queued", 
+            "message": f"SEO optimization queued. Processing {req.batch_size} articles with status '{req.target_status}'. Check logs for progress.", 
+            "batch_size": req.batch_size,
+            "note": "Task is running in background. Use /api/seo/optimize-status to check progress."
+        }
 
 @router.get("/optimize-status")
 def get_seo_optimization_status(x_admin_key: str = Header(None)):
@@ -498,3 +545,64 @@ def get_article_seo_status(article_id: int, x_admin_key: str = Header(None)):
     except Exception as e:
         logger.error(f"Error getting article SEO status: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get article status: {str(e)}")
+
+@router.get("/optimize-diagnostic")
+def diagnostic_seo_optimization(x_admin_key: str = Header(None)):
+    """
+    Diagnostic endpoint to check why optimization might not be working.
+    Returns detailed information about articles and database state.
+    """
+    if x_admin_key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    try:
+        # Check if seo_optimized column exists
+        test_query = supabase.table("blog_posts").select("id, seo_optimized").limit(1).execute()
+        has_seo_column = test_query.data and len(test_query.data) > 0 and 'seo_optimized' in test_query.data[0]
+        
+        # Get counts by rewrite_status
+        all_statuses = supabase.table("blog_posts").select("rewrite_status").execute()
+        status_counts = {}
+        for row in all_statuses.data:
+            status = row.get('rewrite_status', 'unknown')
+            status_counts[status] = status_counts.get(status, 0) + 1
+        
+        # Get completed articles
+        completed_res = supabase.table("blog_posts")\
+            .select("id, slug, title, seo_optimized")\
+            .eq("rewrite_status", "completed")\
+            .limit(10)\
+            .execute()
+        
+        completed_articles = completed_res.data if completed_res else []
+        
+        # Count optimized if column exists
+        optimized_count = 0
+        if has_seo_column:
+            opt_res = supabase.table("blog_posts")\
+                .select("id", count="exact")\
+                .eq("seo_optimized", True)\
+                .execute()
+            optimized_count = opt_res.count if hasattr(opt_res, 'count') else len(opt_res.data) if opt_res.data else 0
+        
+        return {
+            "database_state": {
+                "seo_optimized_column_exists": has_seo_column,
+                "total_articles": len(all_statuses.data) if all_statuses.data else 0
+            },
+            "status_breakdown": status_counts,
+            "completed_articles": {
+                "total": len(completed_articles),
+                "sample": completed_articles[:5],  # Show first 5
+                "optimized_count": optimized_count
+            },
+            "recommendations": [
+                "Run migration to add seo_optimized column" if not has_seo_column else "Column exists ✓",
+                f"Found {status_counts.get('completed', 0)} articles with rewrite_status='completed'",
+                f"Found {optimized_count} articles already optimized" if has_seo_column else "Cannot check optimized count (column missing)",
+                "Use /api/seo/optimize-batch with run_sync=true for testing" if status_counts.get('completed', 0) > 0 else "No articles ready for optimization"
+            ]
+        }
+    except Exception as e:
+        logger.error(f"Error in diagnostic: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Diagnostic failed: {str(e)}")
