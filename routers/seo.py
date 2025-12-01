@@ -537,33 +537,42 @@ def trigger_seo_polish(
     
     Returns a batch_id that can be used to track progress.
     """
-    if x_admin_key != ADMIN_SECRET:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    
-    # Generate unique batch ID
-    batch_id = str(uuid.uuid4())
-    
-    if req.run_sync:
-        # Run synchronously for immediate feedback (testing only)
-        logger.info(f"🔄 Running optimization synchronously (testing mode) - Batch ID: {batch_id}")
-        result = run_optimization_batch(batch_id, req.batch_size, req.target_status)
-        return {
-            "status": "completed",
-            "batch_id": batch_id,
-            "message": f"SEO optimization completed synchronously.",
-            "result": result
-        }
-    else:
-        # Run asynchronously (production)
-        background_tasks.add_task(run_optimization_batch, batch_id, req.batch_size, req.target_status)
-        return {
-            "status": "queued", 
-            "batch_id": batch_id,
-            "message": f"SEO optimization queued. Processing {req.batch_size} articles with status '{req.target_status}'.", 
-            "batch_size": req.batch_size,
-            "check_status_url": f"/api/seo/batch-status/{batch_id}",
-            "note": "Use the batch_id to check status. Task is running in background."
-        }
+    try:
+        if x_admin_key != ADMIN_SECRET:
+            raise HTTPException(status_code=403, detail="Unauthorized")
+        
+        # Generate unique batch ID
+        batch_id = str(uuid.uuid4())
+        
+        # Get run_sync flag (defaults to False if not provided)
+        run_sync = getattr(req, 'run_sync', False)
+        
+        if run_sync:
+            # Run synchronously for immediate feedback (testing only)
+            logger.info(f"🔄 Running optimization synchronously (testing mode) - Batch ID: {batch_id}")
+            result = run_optimization_batch(batch_id, req.batch_size, req.target_status)
+            return {
+                "status": "completed",
+                "batch_id": batch_id,
+                "message": f"SEO optimization completed synchronously.",
+                "result": result
+            }
+        else:
+            # Run asynchronously (production)
+            background_tasks.add_task(run_optimization_batch, batch_id, req.batch_size, req.target_status)
+            return {
+                "status": "queued", 
+                "batch_id": batch_id,
+                "message": f"SEO optimization queued. Processing {req.batch_size} articles with status '{req.target_status}'.", 
+                "batch_size": req.batch_size,
+                "check_status_url": f"/api/seo/batch-status/{batch_id}",
+                "note": "Use the batch_id to check status. Task is running in background."
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in trigger_seo_polish: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to trigger optimization: {str(e)}")
 
 @router.get("/batch-status/{batch_id}")
 def get_batch_status(batch_id: str, x_admin_key: str = Header(None)):
