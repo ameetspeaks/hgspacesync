@@ -2,6 +2,9 @@ import os
 import logging
 import copy
 import time
+import uuid
+from datetime import datetime
+from typing import Dict, Optional
 import yake
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Header
 from pydantic import BaseModel
@@ -12,6 +15,15 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# --- BATCH TRACKING ---
+# In-memory batch tracking (could be moved to DB for persistence)
+batch_tracker: Dict[str, dict] = {}
+
+# --- RATE LIMITING CONFIG ---
+GEMINI_RATE_LIMIT_DELAY = 15  # Seconds between Gemini API calls
+GEMINI_BATCH_DELAY = 30  # Seconds between batches (if processing multiple)
+MAX_RETRIES = 3
 
 # --- CONFIGURATION ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -33,6 +45,8 @@ class StatusRequest(BaseModel):
 class OptimizationRequest(BaseModel):
     batch_size: int = 5
     target_status: str = "completed"  # Only optimize articles that are already rewritten/completed
+    run_sync: bool = False  # If True, runs synchronously (for testing). WARNING: Can timeout on large batches
+    run_sync: bool = False  # If True, runs synchronously (for testing). WARNING: Can timeout on large batches
 
 # --- MODEL HUNTER ---
 def get_working_model():
@@ -118,8 +132,8 @@ def get_sitemap_context():
 
 @retry(
     retry=retry_if_exception_type(ResourceExhausted), 
-    wait=wait_exponential(multiplier=2, min=30, max=90),
-    stop=stop_after_attempt(3)
+    wait=wait_exponential(multiplier=2, min=30, max=120),  # Increased max wait to 2 minutes
+    stop=stop_after_attempt(MAX_RETRIES)
 )
 def optimize_content_with_ai(content_html, sitemap_context, current_slug, title):
     """
@@ -248,12 +262,30 @@ def run_seo_batch_worker(row_ids):
             supabase.table("blog_posts").update({"rewrite_status": "failed"}).eq("id", row['id']).execute()
 
 # --- SEO OPTIMIZATION WORKER ---
-def run_optimization_batch(batch_size, target_status="completed"):
+def run_optimization_batch(batch_id: str, batch_size: int, target_status: str = "completed"):
     """
     Background worker that optimizes blog posts with internal links, alt text, and schema.
     Processes articles that have been rewritten (status='completed') but not yet optimized.
+    
+    Args:
+        batch_id: Unique batch identifier for tracking
+        batch_size: Number of articles to process
+        target_status: Only optimize articles with this rewrite_status
     """
-    logger.info(f"🚀 Starting SEO Optimization Batch (batch_size={batch_size}, target_status={target_status})...")
+    # Initialize batch tracking
+    batch_tracker[batch_id] = {
+        "status": "running",
+        "started_at": datetime.now().isoformat(),
+        "total": 0,
+        "processed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "article_ids": [],
+        "errors": [],
+        "completed_at": None
+    }
+    
+    logger.info(f"🚀 Starting SEO Optimization Batch {batch_id} (batch_size={batch_size}, target_status={target_status})...")
     
     try:
         # 1. Get the Sitemap (Context) - Fetch once per batch
@@ -296,6 +328,10 @@ def run_optimization_batch(batch_size, target_status="completed"):
         
         logger.info(f"📝 Query returned {len(rows)} articles")
         
+        # Update batch tracker with total
+        batch_tracker[batch_id]["total"] = len(rows)
+        batch_tracker[batch_id]["article_ids"] = [r['id'] for r in rows]
+        
         if not rows:
             # Log why no articles were found
             total_completed = supabase.table("blog_posts")\
@@ -316,34 +352,67 @@ def run_optimization_batch(batch_size, target_status="completed"):
                 logger.info(f"ℹ️ Found {total_count} articles with status '{target_status}'")
             
             logger.info("✅ No unoptimized articles found.")
+            batch_tracker[batch_id].update({
+                "status": "completed",
+                "completed_at": datetime.now().isoformat(),
+                "message": "No articles to optimize"
+            })
             return {"status": "done", "message": "No articles to optimize", "processed": 0, "total_available": total_count}
         
         logger.info(f"📝 Found {len(rows)} articles to optimize")
         
         processed = 0
         failed = 0
+        skipped = 0
         
-        for row in rows:
+        for idx, row in enumerate(rows, 1):
             try:
                 article_title = row.get('title') or row.get('Title', 'Untitled')
                 article_slug = row.get('slug', '')
-                logger.info(f"✨ Optimizing: {article_slug} (ID: {row['id']})")
+                article_id = row['id']
+                
+                logger.info(f"✨ [{idx}/{len(rows)}] Optimizing: {article_slug} (ID: {article_id})")
+                
+                # Update batch progress
+                batch_tracker[batch_id]["current_article"] = {
+                    "id": article_id,
+                    "slug": article_slug,
+                    "title": article_title,
+                    "status": "processing"
+                }
                 
                 # Extract HTML from content
                 original_content = row.get('content', '')
                 html_content = extract_html_from_content(original_content)
                 
                 if not html_content or len(html_content.strip()) < 50:
-                    logger.warning(f"⚠️ Skipping ID {row['id']}: Content too short or empty")
+                    logger.warning(f"⚠️ Skipping ID {article_id}: Content too short or empty")
+                    skipped += 1
+                    batch_tracker[batch_id]["skipped"] = skipped
                     continue
                 
-                # Call AI to optimize
-                optimized_html = optimize_content_with_ai(
-                    html_content, 
-                    sitemap_ctx, 
-                    article_slug,
-                    article_title
-                )
+                # Call AI to optimize with rate limiting
+                try:
+                    optimized_html = optimize_content_with_ai(
+                        html_content, 
+                        sitemap_ctx, 
+                        article_slug,
+                        article_title
+                    )
+                except ResourceExhausted as rate_error:
+                    logger.warning(f"⚠️ Rate limit hit for ID {article_id}, waiting longer...")
+                    # Wait longer on rate limit
+                    time.sleep(60)  # Wait 1 minute on rate limit
+                    # Retry once
+                    try:
+                        optimized_html = optimize_content_with_ai(
+                            html_content, 
+                            sitemap_ctx, 
+                            article_slug,
+                            article_title
+                        )
+                    except Exception as retry_error:
+                        raise retry_error
                 
                 # Update DB - try to set seo_optimized, but handle if column doesn't exist
                 update_data = {
@@ -354,32 +423,63 @@ def run_optimization_batch(batch_size, target_status="completed"):
                 # Try to set seo_optimized flag if column exists
                 try:
                     update_data["seo_optimized"] = True
-                    supabase.table("blog_posts").update(update_data).eq("id", row['id']).execute()
+                    supabase.table("blog_posts").update(update_data).eq("id", article_id).execute()
                 except Exception as col_error:
                     # If column doesn't exist, just update content
                     logger.debug(f"seo_optimized column update failed (may not exist): {col_error}")
                     supabase.table("blog_posts").update({
                         "content": optimized_html,
                         "updated_at": "now()"
-                    }).eq("id", row['id']).execute()
+                    }).eq("id", article_id).execute()
                 
                 processed += 1
-                logger.info(f"✅ Done: {article_slug} (ID: {row['id']})")
+                batch_tracker[batch_id]["processed"] = processed
+                logger.info(f"✅ [{idx}/{len(rows)}] Done: {article_slug} (ID: {article_id})")
                 
-                # Throttle to avoid rate limits
-                time.sleep(10)
+                # Rate limiting: Wait between API calls (except for last article)
+                if idx < len(rows):
+                    logger.info(f"⏳ Rate limiting: Waiting {GEMINI_RATE_LIMIT_DELAY}s before next article...")
+                    time.sleep(GEMINI_RATE_LIMIT_DELAY)
                 
             except Exception as e:
                 failed += 1
-                logger.error(f"❌ Failed ID {row['id']}: {e}", exc_info=True)
+                error_msg = str(e)
+                logger.error(f"❌ Failed ID {row['id']}: {error_msg}", exc_info=True)
+                batch_tracker[batch_id]["failed"] = failed
+                batch_tracker[batch_id]["errors"].append({
+                    "article_id": row['id'],
+                    "slug": row.get('slug', ''),
+                    "error": error_msg
+                })
+                # Shorter wait on error
                 time.sleep(5)
         
-        logger.info(f"🎉 Batch complete! Processed: {processed}, Failed: {failed}")
-        return {"status": "completed", "processed": processed, "failed": failed}
+        logger.info(f"🎉 Batch {batch_id} complete! Processed: {processed}, Failed: {failed}, Skipped: {skipped}")
+        
+        # Update batch tracker
+        batch_tracker[batch_id].update({
+            "status": "completed",
+            "processed": processed,
+            "failed": failed,
+            "skipped": skipped,
+            "completed_at": datetime.now().isoformat(),
+            "current_article": None
+        })
+        
+        return {"status": "completed", "processed": processed, "failed": failed, "skipped": skipped}
         
     except Exception as e:
-        logger.error(f"❌ Batch Error: {e}", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        error_msg = str(e)
+        logger.error(f"❌ Batch {batch_id} Error: {error_msg}", exc_info=True)
+        
+        # Update batch tracker with error
+        batch_tracker[batch_id].update({
+            "status": "error",
+            "completed_at": datetime.now().isoformat(),
+            "error": error_msg
+        })
+        
+        return {"status": "error", "message": error_msg}
 
 # --- ENDPOINTS ---
 
@@ -435,33 +535,74 @@ def trigger_seo_polish(
     Triggers SEO optimization batch job.
     Adds internal links, image alt text, and JSON-LD schema to blog articles.
     
-    Args:
-        req: Optimization request with batch_size and target_status
-        background_tasks: FastAPI background tasks
-        x_admin_key: Admin authentication key
-        run_sync: If True, runs synchronously (for testing). Default: False (async)
+    Returns a batch_id that can be used to track progress.
     """
     if x_admin_key != ADMIN_SECRET:
         raise HTTPException(status_code=403, detail="Unauthorized")
     
+    # Generate unique batch ID
+    batch_id = str(uuid.uuid4())
+    
     if req.run_sync:
         # Run synchronously for immediate feedback (testing only)
-        logger.info("🔄 Running optimization synchronously (testing mode)")
-        result = run_optimization_batch(req.batch_size, req.target_status)
+        logger.info(f"🔄 Running optimization synchronously (testing mode) - Batch ID: {batch_id}")
+        result = run_optimization_batch(batch_id, req.batch_size, req.target_status)
         return {
             "status": "completed",
+            "batch_id": batch_id,
             "message": f"SEO optimization completed synchronously.",
             "result": result
         }
     else:
         # Run asynchronously (production)
-        background_tasks.add_task(run_optimization_batch, req.batch_size, req.target_status)
+        background_tasks.add_task(run_optimization_batch, batch_id, req.batch_size, req.target_status)
         return {
             "status": "queued", 
-            "message": f"SEO optimization queued. Processing {req.batch_size} articles with status '{req.target_status}'. Check logs for progress.", 
+            "batch_id": batch_id,
+            "message": f"SEO optimization queued. Processing {req.batch_size} articles with status '{req.target_status}'.", 
             "batch_size": req.batch_size,
-            "note": "Task is running in background. Use /api/seo/optimize-status to check progress."
+            "check_status_url": f"/api/seo/batch-status/{batch_id}",
+            "note": "Use the batch_id to check status. Task is running in background."
         }
+
+@router.get("/batch-status/{batch_id}")
+def get_batch_status(batch_id: str, x_admin_key: str = Header(None)):
+    """
+    Get the status of a running or completed optimization batch.
+    
+    Returns:
+        - status: "running", "completed", "error"
+        - progress: processed/total
+        - details: article IDs, errors, etc.
+    """
+    if x_admin_key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    if batch_id not in batch_tracker:
+        raise HTTPException(status_code=404, detail=f"Batch {batch_id} not found. It may have expired or never existed.")
+    
+    batch_info = batch_tracker[batch_id].copy()
+    
+    # Calculate progress percentage
+    if batch_info["total"] > 0:
+        batch_info["progress_percentage"] = round(
+            (batch_info["processed"] + batch_info["failed"] + batch_info["skipped"]) / batch_info["total"] * 100, 
+            2
+        )
+    else:
+        batch_info["progress_percentage"] = 0
+    
+    # Calculate elapsed time
+    if batch_info.get("started_at"):
+        started = datetime.fromisoformat(batch_info["started_at"])
+        if batch_info.get("completed_at"):
+            completed = datetime.fromisoformat(batch_info["completed_at"])
+            elapsed = (completed - started).total_seconds()
+        else:
+            elapsed = (datetime.now() - started).total_seconds()
+        batch_info["elapsed_seconds"] = round(elapsed, 2)
+    
+    return batch_info
 
 @router.get("/optimize-status")
 def get_seo_optimization_status(x_admin_key: str = Header(None)):
