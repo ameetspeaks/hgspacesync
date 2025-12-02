@@ -459,6 +459,7 @@ INSTRUCTIONS:
    - Do NOT link to the current page ({current_slug}).
    - Ensure anchor text is natural and flows with the content.
    - Only link when there's genuine semantic relevance.
+   - IMPORTANT: Use HTML format ONLY. Use <a href="/blog/slug">text</a> format, NOT markdown [text](url) format.
 
 2. **Image Optimization:** If you find <img> tags without 'alt' attributes, add descriptive, keyword-rich alt text that describes the image content.
 
@@ -489,6 +490,15 @@ OUTPUT: Return ONLY the updated HTML content. No markdown code blocks, no explan
             optimized_html = optimized_html.split("```")[-1]
         if optimized_html.endswith("```"):
             optimized_html = optimized_html.rsplit("```", 1)[0]
+        
+        # Convert markdown-style links [text](url) to HTML <a> tags if present
+        import re
+        markdown_link_pattern = r'\[([^\]]+)\]\(([^)]+)\)'
+        optimized_html = re.sub(markdown_link_pattern, r'<a href="\2">\1</a>', optimized_html)
+        
+        # Also handle any remaining markdown-style links with brackets only [text] - convert to plain text
+        # This handles cases where AI might output [text] without proper links
+        optimized_html = re.sub(r'\[([^\]]+)\]', r'\1', optimized_html)
         
         return optimized_html.strip()
         
