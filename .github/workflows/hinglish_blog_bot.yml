@@ -1,0 +1,128 @@
+name: Hinglish Blog Generator
+
+on:
+  workflow_dispatch: # Manual trigger
+    inputs:
+      batch_size:
+        description: 'Number of articles to generate per batch'
+        required: false
+        default: '5'
+        type: string
+  schedule:
+    - cron: '0 */2 * * *' # Run every 2 hours
+
+jobs:
+  generate-blogs:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Validate and Prepare URL
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+        run: |
+          if [ -z "$BACKEND_URL" ]; then
+            echo "::error::BACKEND_URL secret is missing! Go to Settings > Secrets > Actions to add it."
+            exit 1
+          fi
+
+          # 1. Ensure URL starts with https://
+          if [[ "$BACKEND_URL" != http* ]]; then
+             BACKEND_URL="https://$BACKEND_URL"
+          fi
+
+          # 2. Remove trailing slash if present
+          BACKEND_URL="${BACKEND_URL%/}"
+          
+          # Save the cleaned URL to GITHUB_ENV for the next steps
+          echo "TARGET_URL=$BACKEND_URL" >> $GITHUB_ENV
+          
+          if [ -z "$ADMIN_SECRET" ]; then
+            echo "::error::ADMIN_SECRET secret is missing! Go to Settings > Secrets > Actions to add it."
+            exit 1
+          fi
+          
+          echo "BACKEND_URL=$BACKEND_URL" >> $GITHUB_ENV
+          echo "ADMIN_SECRET=$ADMIN_SECRET" >> $GITHUB_ENV
+
+      - name: Trigger Content Generation
+        env:
+          TARGET_URL: ${{ env.TARGET_URL }}
+          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+          BATCH_SIZE: ${{ github.event.inputs.batch_size || '5' }}
+        run: |
+          set -e
+          
+          echo "🚀 Triggering AI Writer..."
+          echo "📍 Space URL: $TARGET_URL"
+          echo "📦 Batch Size: $BATCH_SIZE"
+          
+          # Make the API call
+          response=$(curl -s -w "\n%{http_code}" -X POST "${TARGET_URL}/api/content/run-batch" \
+            -H "Content-Type: application/json" \
+            -H "x-admin-key: ${ADMIN_SECRET}" \
+            -d "{\"batch_size\": ${BATCH_SIZE}}" \
+            --max-time 300 \
+            -L) || {
+            echo "::error::Failed to connect to API"
+            exit 1
+          }
+          
+          # Extract HTTP status code (last line)
+          http_code=$(echo "$response" | tail -n1)
+          # Extract response body (all but last line)
+          body=$(echo "$response" | head -n-1)
+          
+          echo "📊 Response Status: $http_code"
+          echo "📄 Response Body: $body"
+          
+          # Check if request was successful
+          if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+            echo "✅ Content generation batch queued successfully!"
+            
+            # Pretty print JSON if jq is available
+            if command -v jq &> /dev/null; then
+              echo "$body" | jq '.'
+            else
+              echo "$body"
+            fi
+          else
+            echo "::error::Request failed with status $http_code"
+            echo "$body"
+            echo ""
+            echo "Troubleshooting:"
+            echo "1. Check if the Space is awake and running"
+            echo "2. Verify ADMIN_SECRET is correct"
+            echo "3. Check Space logs for detailed error messages"
+            echo "4. Verify content_queue table has pending keywords"
+            exit 1
+          fi
+
+      - name: Check Queue Status
+        env:
+          TARGET_URL: ${{ env.TARGET_URL }}
+          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+        run: |
+          echo "🔍 Checking queue status..."
+          
+          response=$(curl -s -w "\n%{http_code}" -X GET "${TARGET_URL}/api/content/queue-status" \
+            -H "x-admin-key: ${ADMIN_SECRET}" \
+            --max-time 60 \
+            -L) || {
+            echo "⚠️ Failed to check queue status"
+            exit 0  # Don't fail the workflow if status check fails
+          }
+          
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | head -n-1)
+          
+          if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+            echo "📋 Queue Status:"
+            if command -v jq &> /dev/null; then
+              echo "$body" | jq '.'
+            else
+              echo "$body"
+            fi
+          else
+            echo "⚠️ Could not fetch queue status (HTTP $http_code)"
+          fi
