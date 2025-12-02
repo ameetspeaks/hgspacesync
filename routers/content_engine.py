@@ -76,7 +76,17 @@ def get_working_model():
     for model_name in models_to_try:
         try:
             logger.info(f"🔍 Trying model: {model_name}")
-            model = genai.GenerativeModel(model_name)
+            # Try to use JSON mode if available (for gemini-2.0-flash and newer)
+            try:
+                model = genai.GenerativeModel(
+                    model_name,
+                    generation_config=genai.types.GenerationConfig(
+                        response_mime_type="application/json"
+                    )
+                )
+            except Exception:
+                # Fallback to regular model if JSON mode not supported
+                model = genai.GenerativeModel(model_name)
             logger.info(f"✅ Model {model_name} initialized successfully")
             return model
         except Exception as e:
@@ -123,7 +133,7 @@ INSTRUCTIONS:
    - Write 800-1200 words of high-quality content.
    - Use internal linking suggestions in markdown format: [link text](/relevant-page)
 
-4. **Format:** Return ONLY valid JSON. No markdown code blocks, no explanations, just pure JSON.
+4. **Format:** Return ONLY valid JSON. No markdown code blocks, no explanations, no control characters, just pure JSON.
 
 5. **Content Style:**
    - Mix Hindi (in Roman script) and English naturally
@@ -131,22 +141,25 @@ INSTRUCTIONS:
    - Use common Hindi phrases: "Kya hai", "Kaise banta hai", "Kya karna chahiye", "Fayde", "Nuksan"
    - Keep it engaging and easy to read
 
-JSON OUTPUT FORMAT:
+JSON OUTPUT FORMAT (MUST BE VALID JSON):
 {{
     "title": "The SEO Title in Hinglish",
     "slug_base": "english-keyword-slug",
     "seo_description": "150 chars meta description in Hinglish",
-    "content_markdown": "The full blog article in markdown format with proper headings (##, ###), bullet points, and paragraphs. NO HTML tags, only markdown.",
+    "content_markdown": "The full blog article in markdown format with proper headings (##, ###), bullet points, and paragraphs. NO HTML tags, only markdown. Escape all quotes and newlines properly.",
     "tags": ["tag1", "tag2", "tag3"],
     "category": "Astrology/Yoga/Remedies"
 }}
 
-IMPORTANT: 
-- Return ONLY the JSON object, no markdown code fences, no explanations
+CRITICAL REQUIREMENTS: 
+- Return ONLY the JSON object, no markdown code fences, no explanations, no text before or after
+- Escape all special characters in strings (quotes, newlines, etc.)
+- Do NOT include any control characters (characters below ASCII 32 except newline and tab)
 - content_markdown should be pure markdown (not HTML)
 - Make sure the content is well-structured with proper headings
 - Include practical tips and remedies
 - Keep the tone conversational and engaging
+- Ensure JSON is valid and parseable
 """
 
     try:
@@ -156,16 +169,59 @@ IMPORTANT:
         # Clean up response (remove markdown code blocks if present)
         clean_text = response_text.replace("```json", "").replace("```", "").strip()
         
+        # Remove control characters that break JSON parsing
+        # Keep only printable characters, newlines, and tabs
+        import string
+        # Allow printable chars, newline (\n), tab (\t), and carriage return (\r)
+        allowed_chars = set(string.printable) | {'\n', '\t', '\r'}
+        # Remove any character that's not allowed (control chars except newline/tab)
+        clean_text = ''.join(
+            char if (char in allowed_chars or ord(char) >= 32) else ' ' 
+            for char in clean_text
+        )
+        
+        # Remove any trailing commas before closing braces/brackets (common JSON error)
+        clean_text = re.sub(r',(\s*[}\]])', r'\1', clean_text)
+        
         # Try to parse JSON
-        try:
-            data = json.loads(clean_text)
-        except json.JSONDecodeError:
-            # If JSON parsing fails, try to extract JSON from the response
-            json_match = re.search(r'\{.*\}', clean_text, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group())
-            else:
-                raise Exception(f"Failed to parse JSON from response: {clean_text[:200]}")
+        data = None
+        parse_attempts = [
+            # Attempt 1: Direct parse
+            lambda: json.loads(clean_text),
+            # Attempt 2: Extract JSON object from text
+            lambda: json.loads(re.search(r'\{.*\}', clean_text, re.DOTALL).group()),
+            # Attempt 3: Try to fix common issues and parse
+            lambda: json.loads(_fix_json_common_issues(clean_text)),
+            # Attempt 4: Extract between first { and last }
+            lambda: json.loads(_extract_json_object(clean_text))
+        ]
+        
+        last_error = None
+        for attempt in parse_attempts:
+            try:
+                data = attempt()
+                break
+            except (json.JSONDecodeError, AttributeError) as e:
+                last_error = e
+                continue
+        
+        if data is None:
+            # Log more details for debugging
+            logger.error(f"JSON parsing failed for keyword: {keyword}")
+            logger.error(f"Last error: {str(last_error)}")
+            logger.error(f"Response length: {len(clean_text)}")
+            logger.error(f"Response preview (first 1000 chars): {clean_text[:1000]}")
+            # Try to save problematic response for manual inspection
+            try:
+                import tempfile
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                    f.write(f"Keyword: {keyword}\n")
+                    f.write(f"Original response:\n{response_text}\n\n")
+                    f.write(f"Cleaned response:\n{clean_text}\n")
+                    logger.error(f"Saved problematic response to: {f.name}")
+            except Exception:
+                pass
+            raise Exception(f"Failed to parse JSON after multiple attempts: {str(last_error)}")
         
         # Validate required fields
         required_fields = ['title', 'slug_base', 'seo_description', 'content_markdown', 'tags', 'category']
@@ -178,6 +234,59 @@ IMPORTANT:
     except Exception as e:
         logger.error(f"Error generating content for '{keyword}': {str(e)}")
         raise
+
+def _fix_json_common_issues(text):
+    """Fix common JSON issues"""
+    # Remove trailing commas before closing braces/brackets
+    text = re.sub(r',(\s*[}\]])', r'\1', text)
+    # Remove control characters (except newlines and tabs)
+    text = ''.join(char for char in text if ord(char) >= 32 or char in '\n\t\r')
+    # Fix unescaped newlines in strings (basic attempt - be careful)
+    # Only fix if it's clearly inside a string value
+    # This is a simplified fix - may not handle all cases
+    return text
+
+def _extract_json_object(text):
+    """Extract JSON object from text, handling nested braces"""
+    # Find the first {
+    start = text.find('{')
+    if start == -1:
+        raise ValueError("No opening brace found")
+    
+    # Count braces to find matching closing brace
+    brace_count = 0
+    end = start
+    in_string = False
+    escape_next = False
+    
+    for i in range(start, len(text)):
+        char = text[i]
+        
+        if escape_next:
+            escape_next = False
+            continue
+        
+        if char == '\\':
+            escape_next = True
+            continue
+        
+        if char == '"' and not escape_next:
+            in_string = not in_string
+            continue
+        
+        if not in_string:
+            if char == '{':
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    end = i + 1
+                    break
+    
+    if brace_count != 0:
+        raise ValueError("Unmatched braces")
+    
+    return text[start:end]
 
 # --- WORKER ---
 def run_content_batch(batch_size):
