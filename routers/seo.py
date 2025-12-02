@@ -849,7 +849,7 @@ def parse_markdown_to_blocks(markdown):
             children = parse_markdown_links(text)
             current_list.append(children[0]['text'] if children and children[0].get('type') == 'text' else text)
             i += 1
-                    continue
+            continue
         
         # Regular text
         if current_list:
