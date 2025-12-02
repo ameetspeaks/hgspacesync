@@ -1,0 +1,72 @@
+name: Trigger AI Blog Writer
+
+on:
+  schedule:
+    # Runs at minute 0 past every hour (24 times a day)
+    - cron: '0 * * * *'
+  workflow_dispatch: 
+    # Adds a manual "Run Workflow" button in GitHub Actions tab for testing
+
+jobs:
+  trigger_api:
+    runs-on: ubuntu-latest
+    env:
+      # Map secrets to environment variables
+      BACKEND_URL: ${{ secrets.BACKEND_URL }}
+      ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+    steps:
+      - name: Validate and Prepare URL
+        run: |
+          if [ -z "$BACKEND_URL" ]; then
+            echo "::error::BACKEND_URL secret is missing! Go to Settings > Secrets > Actions to add it."
+            exit 1
+          fi
+
+          # 1. Ensure URL starts with https://
+          # If it doesn't start with http, we prepend it.
+          if [[ "$BACKEND_URL" != http* ]]; then
+             BACKEND_URL="https://$BACKEND_URL"
+          fi
+
+          # 2. Remove trailing slash if present (to avoid https://url//trigger-write)
+          BACKEND_URL="${BACKEND_URL%/}"
+          
+          # Save the cleaned URL to GITHUB_ENV for the next steps
+          echo "TARGET_URL=$BACKEND_URL" >> $GITHUB_ENV
+          
+          if [ -z "$ADMIN_SECRET" ]; then
+            echo "::warning::ADMIN_SECRET is missing. The request might fail authorization."
+          fi
+
+      - name: Wake up and Trigger
+        run: |
+          echo "--------------------------------------"
+          echo "Phase 1: Waking up the Space..."
+          echo "Target: $TARGET_URL"
+          echo "--------------------------------------"
+          
+          # 1. Wake up call (Simple GET request to the root /)
+          # We use -L to follow redirects
+          # We use -k (insecure) to ignore SSL name mismatches (common with HF wildcard certs)
+          # The '|| true' ensures the workflow doesn't fail if the first ping times out.
+          curl -s -L -k -o /dev/null -w "%{http_code}" "$TARGET_URL/" || true
+          
+          echo -e "\n\nSpace pinged. Waiting 30 seconds for container boot..."
+          sleep 30
+          
+          echo "--------------------------------------"
+          echo "Phase 2: Triggering Blog Generation..."
+          echo "--------------------------------------"
+          
+          # 2. The Actual Trigger (POST request)
+          # Using ADMIN_SECRET for the Bearer token
+          # Added -k to bypass SSL certificate subject name mismatch
+          response=$(curl -k -X POST "$TARGET_URL/trigger-write" \
+          -H "Content-Type: application/json" \
+          -H "Authorization: Bearer $ADMIN_SECRET" \
+          --max-time 300 \
+          -L \
+          -w "\nHTTP_STATUS:%{http_code}")
+          
+          echo "Server Response:"
+          echo "$response"
