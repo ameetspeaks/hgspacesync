@@ -77,15 +77,30 @@ def count_words(text):
 def extract_html_from_content(content):
     """
     Extracts HTML content from various formats (JSONB, string, etc.)
+    Converts structured content blocks to HTML for optimization.
     Returns the HTML string ready for optimization.
     """
+    import json
+    
     if isinstance(content, str):
+        # Check if it's JSON string
+        try:
+            parsed = json.loads(content)
+            if isinstance(parsed, (dict, list)):
+                return convert_content_blocks_to_html(parsed)
+        except (json.JSONDecodeError, ValueError):
+            pass
+        
         # If it's already a string, check if it's HTML
         if "<" in content and ">" in content:
             return content
         # If it's plain text, wrap it in a basic HTML structure
         return f"<div>{content}</div>"
     elif isinstance(content, dict):
+        # Check if it's structured content blocks
+        if 'contentBlocks' in content or '__component' in str(content):
+            return convert_content_blocks_to_html(content)
+        
         # Try to find HTML in common fields
         html_fields = ['html', 'content', 'text', 'body']
         for field in html_fields:
@@ -94,6 +109,10 @@ def extract_html_from_content(content):
         # If no HTML field found, convert dict to HTML
         return f"<div>{str(content)}</div>"
     elif isinstance(content, list):
+        # Check if it's a list of content blocks
+        if content and isinstance(content[0], dict) and ('__component' in content[0] or 'body' in content[0]):
+            return convert_content_blocks_to_html(content)
+        
         # If it's a list, try to extract HTML from items
         html_parts = []
         for item in content:
@@ -107,6 +126,289 @@ def extract_html_from_content(content):
         return "".join(html_parts) if html_parts else f"<div>{str(content)}</div>"
     else:
         return f"<div>{str(content)}</div>"
+
+def convert_content_blocks_to_html(content):
+    """
+    Converts structured content blocks (Strapi/Contentful format) to HTML.
+    Handles rich-text blocks, paragraphs, headings, lists, etc.
+    """
+    html_parts = []
+    
+    # Handle list of blocks
+    if isinstance(content, list):
+        blocks = content
+    elif isinstance(content, dict):
+        # Check if contentBlocks field exists
+        if 'contentBlocks' in content:
+            blocks = content['contentBlocks']
+        elif 'body' in content:
+            blocks = content['body'] if isinstance(content['body'], list) else [content]
+        else:
+            blocks = [content]
+    else:
+        return f"<div>{str(content)}</div>"
+    
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+            
+        component = block.get('__component', '')
+        body = block.get('body', [])
+        
+        # Handle rich-text blocks
+        if 'rich-text' in component or 'body' in block:
+            if isinstance(body, list):
+                for para in body:
+                    if isinstance(para, dict):
+                        html_parts.append(convert_paragraph_to_html(para))
+            elif isinstance(body, str):
+                html_parts.append(f"<p>{body}</p>")
+        # Handle other block types
+        elif isinstance(block, str):
+            html_parts.append(f"<p>{block}</p>")
+    
+    return "".join(html_parts) if html_parts else f"<div>{str(content)}</div>"
+
+def convert_paragraph_to_html(para):
+    """
+    Converts a paragraph block (with children) to HTML.
+    Handles text, bold, italic, links, etc.
+    """
+    if not isinstance(para, dict):
+        return f"<p>{str(para)}</p>"
+    
+    para_type = para.get('type', 'paragraph')
+    children = para.get('children', [])
+    
+    if para_type == 'heading':
+        level = para.get('level', 1)
+        text = extract_text_from_children(children)
+        return f"<h{level}>{text}</h{level}>"
+    elif para_type == 'paragraph':
+        text = extract_text_with_formatting(children)
+        return f"<p>{text}</p>"
+    elif para_type == 'list':
+        list_type = para.get('format', 'unordered')
+        items = para.get('children', [])
+        tag = 'ul' if list_type == 'unordered' else 'ol'
+        items_html = "".join([f"<li>{extract_text_from_children(item.get('children', []))}</li>" for item in items])
+        return f"<{tag}>{items_html}</{tag}>"
+    else:
+        text = extract_text_from_children(children)
+        return f"<p>{text}</p>"
+
+def extract_text_with_formatting(children):
+    """Extracts text from children with formatting (bold, italic, links)."""
+    if not children:
+        return ""
+    
+    result = []
+    for child in children:
+        if isinstance(child, dict):
+            child_type = child.get('type', 'text')
+            text = child.get('text', '')
+            
+            if child_type == 'link':
+                url = child.get('url', '#')
+                link_children = child.get('children', [])
+                link_text = extract_text_from_children(link_children)
+                result.append(f'<a href="{url}">{link_text}</a>')
+            elif child_type == 'text':
+                if child.get('bold'):
+                    text = f"<strong>{text}</strong>"
+                if child.get('italic'):
+                    text = f"<em>{text}</em>"
+                result.append(text)
+            else:
+                result.append(text)
+        elif isinstance(child, str):
+            result.append(child)
+    
+    return "".join(result)
+
+def extract_text_from_children(children):
+    """Simple text extraction without formatting."""
+    if not children:
+        return ""
+    return "".join([child.get('text', '') if isinstance(child, dict) else str(child) for child in children])
+
+def convert_html_to_content_blocks(html_content, original_content):
+    """
+    Converts optimized HTML back to structured content blocks format.
+    Uses regex-based parsing for reliability.
+    """
+    import re
+    from html import unescape
+    
+    # Remove script tags (schema) - we'll add it separately if needed
+    html_content = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+    
+    # Split by block-level tags
+    blocks = []
+    
+    # Pattern to match block elements
+    block_pattern = r'<(h[1-6]|p|div|ul|ol|li)[^>]*>(.*?)</\1>'
+    
+    # Split content by block tags
+    parts = re.split(r'(<(?:h[1-6]|p|div|ul|ol)[^>]*>.*?</(?:h[1-6]|p|div|ul|ol)>)', html_content, flags=re.DOTALL | re.IGNORECASE)
+    
+    for part in parts:
+        if not part.strip():
+            continue
+            
+        part = part.strip()
+        
+        # Heading
+        heading_match = re.match(r'<h([1-6])[^>]*>(.*?)</h\1>', part, re.DOTALL | re.IGNORECASE)
+        if heading_match:
+            level = int(heading_match.group(1))
+            content = heading_match.group(2)
+            children = parse_inline_content(content)
+            blocks.append({
+                'type': 'heading',
+                'level': level,
+                'children': children
+            })
+            continue
+        
+        # Paragraph
+        para_match = re.match(r'<p[^>]*>(.*?)</p>', part, re.DOTALL | re.IGNORECASE)
+        if para_match:
+            content = para_match.group(1)
+            children = parse_inline_content(content)
+            if children:
+                blocks.append({
+                    'type': 'paragraph',
+                    'children': children
+                })
+            continue
+        
+        # List
+        list_match = re.match(r'<(ul|ol)[^>]*>(.*?)</\1>', part, re.DOTALL | re.IGNORECASE)
+        if list_match:
+            list_type = 'unordered' if list_match.group(1).lower() == 'ul' else 'ordered'
+            list_content = list_match.group(2)
+            items = re.findall(r'<li[^>]*>(.*?)</li>', list_content, re.DOTALL | re.IGNORECASE)
+            list_children = []
+            for item in items:
+                item_children = parse_inline_content(item)
+                if item_children:
+                    list_children.append({'children': item_children})
+            if list_children:
+                blocks.append({
+                    'type': 'list',
+                    'format': list_type,
+                    'children': list_children
+                })
+            continue
+        
+        # Div or other content - treat as paragraph
+        div_match = re.match(r'<div[^>]*>(.*?)</div>', part, re.DOTALL | re.IGNORECASE)
+        if div_match:
+            content = div_match.group(1)
+            children = parse_inline_content(content)
+            if children:
+                blocks.append({
+                    'type': 'paragraph',
+                    'children': children
+                })
+            continue
+        
+        # Plain text - create paragraph
+        text = re.sub(r'<[^>]+>', '', part)  # Remove any remaining tags
+        text = unescape(text).strip()
+        if text:
+            blocks.append({
+                'type': 'paragraph',
+                'children': [{'type': 'text', 'text': text}]
+            })
+    
+    # If we got blocks, wrap in contentBlocks structure
+    if blocks:
+        return [{
+            '__component': 'blog-components.rich-text',
+            'body': blocks
+        }]
+    
+    # Fallback: return original if conversion failed
+    logger.warning("Failed to convert HTML to content blocks, returning original structure")
+    return original_content
+
+def parse_inline_content(html):
+    """
+    Parses inline HTML content (text, links, bold, italic) into structured children.
+    """
+    import re
+    from html import unescape
+    
+    if not html:
+        return []
+    
+    children = []
+    # Pattern to match links
+    link_pattern = r'<a[^>]*href=["\']([^"\']*)["\'][^>]*>(.*?)</a>'
+    
+    last_pos = 0
+    for match in re.finditer(link_pattern, html, re.DOTALL | re.IGNORECASE):
+        # Text before link
+        before = html[last_pos:match.start()]
+        if before:
+            before_text = parse_text_formatting(before)
+            children.extend(before_text)
+        
+        # Link
+        href = match.group(1)
+        link_text = match.group(2)
+        link_children = parse_text_formatting(link_text)
+        children.append({
+            'type': 'link',
+            'url': href,
+            'children': link_children if link_children else [{'type': 'text', 'text': link_text}]
+        })
+        
+        last_pos = match.end()
+    
+    # Text after last link
+    after = html[last_pos:]
+    if after:
+        after_text = parse_text_formatting(after)
+        children.extend(after_text)
+    
+    return children if children else [{'type': 'text', 'text': unescape(re.sub(r'<[^>]+>', '', html))}]
+
+def parse_text_formatting(text):
+    """
+    Parses text with bold/italic formatting.
+    """
+    import re
+    from html import unescape
+    
+    if not text:
+        return []
+    
+    children = []
+    # Remove HTML tags but preserve content
+    text = re.sub(r'<strong[^>]*>(.*?)</strong>', r'**\1**', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<em[^>]*>(.*?)</em>', r'*\1*', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<b[^>]*>(.*?)</b>', r'**\1**', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<i[^>]*>(.*?)</i>', r'*\1*', text, flags=re.DOTALL | re.IGNORECASE)
+    
+    # Remove remaining HTML tags
+    clean_text = re.sub(r'<[^>]+>', '', text)
+    clean_text = unescape(clean_text)
+    
+    if clean_text.strip():
+        # Simple approach: if we found ** or *, split and create formatted text
+        parts = re.split(r'(\*\*.*?\*\*|\*.*?\*)', clean_text)
+        for part in parts:
+            if part.startswith('**') and part.endswith('**'):
+                children.append({'type': 'text', 'text': part[2:-2], 'bold': True})
+            elif part.startswith('*') and part.endswith('*') and len(part) > 2:
+                children.append({'type': 'text', 'text': part[1:-1], 'italic': True})
+            elif part:
+                children.append({'type': 'text', 'text': part})
+    
+    return children if children else [{'type': 'text', 'text': clean_text}]
 
 def get_sitemap_context():
     """
@@ -413,9 +715,23 @@ def run_optimization_batch(batch_id: str, batch_size: int, target_status: str = 
                     except Exception as retry_error:
                         raise retry_error
                 
+                # Convert optimized HTML back to structured format if original was structured
+                original_content = row.get('content', '')
+                if isinstance(original_content, (dict, list)) or (isinstance(original_content, str) and (original_content.strip().startswith('[') or original_content.strip().startswith('{'))):
+                    # Original was structured, convert HTML back to structured format
+                    try:
+                        optimized_content = convert_html_to_content_blocks(optimized_html, original_content)
+                    except Exception as conv_error:
+                        logger.warning(f"⚠️ Failed to convert HTML back to structured format for ID {article_id}: {conv_error}")
+                        # Fallback: store as HTML string (frontend will handle it)
+                        optimized_content = optimized_html
+                else:
+                    # Original was plain text/HTML, keep as HTML
+                    optimized_content = optimized_html
+                
                 # Update DB - try to set seo_optimized, but handle if column doesn't exist
                 update_data = {
-                    "content": optimized_html,
+                    "content": optimized_content,
                     "updated_at": "now()"
                 }
                 
