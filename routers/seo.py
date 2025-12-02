@@ -3,6 +3,7 @@ import logging
 import copy
 import time
 import uuid
+import re
 from datetime import datetime
 from typing import Dict, Optional
 import yake
@@ -47,22 +48,34 @@ class OptimizationRequest(BaseModel):
     target_status: str = "completed"  # Only optimize articles that are already rewritten/completed
     run_sync: bool = False  # If True, runs synchronously (for testing). WARNING: Can timeout on large batches
 
+class RestructureRequest(BaseModel):
+    batch_size: int = 10
+    article_ids: Optional[list[int]] = None  # If provided, only restructure these articles
+    dry_run: bool = False  # If True, only shows what would be changed without updating
+    seo_optimize: bool = True  # If True, also optimizes for SEO (internal links, headings, etc.)
+
 # --- MODEL HUNTER ---
 def get_working_model():
-    candidates = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-pro"]
-    for name in candidates:
+    """Try different models in order of preference."""
+    models_to_try = [
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+        "gemini-pro"
+    ]
+    
+    for model_name in models_to_try:
         try:
-            model = genai.GenerativeModel(name)
-            model.generate_content("Test")
+            model = genai.GenerativeModel(model_name)
+            # Test with a simple prompt
+            model.generate_content("test")
             return model
         except Exception as e:
-            logger.debug(f"Model {name} failed: {e}")
+            logger.debug(f"Model {model_name} not available: {e}")
             continue
-    raise Exception("No working Gemini model found.")
+    
+    raise Exception("No working Gemini model found")
 
-# --- HELPER FUNCTIONS ---
 def extract_keywords(title, content, existing):
-    if existing and len(existing) > 3: return existing
     try:
         text_sample = f"{title} {str(content)[:1000]}"
         keywords = kw_extractor.extract_keywords(text_sample)
@@ -170,67 +183,81 @@ def convert_content_blocks_to_html(content):
     return "".join(html_parts) if html_parts else f"<div>{str(content)}</div>"
 
 def convert_paragraph_to_html(para):
-    """
-    Converts a paragraph block (with children) to HTML.
-    Handles text, bold, italic, links, etc.
-    """
-    if not isinstance(para, dict):
-        return f"<p>{str(para)}</p>"
+    """Convert a paragraph/heading/list block to HTML."""
+    import re
+    from html import escape
     
     para_type = para.get('type', 'paragraph')
-    children = para.get('children', [])
     
     if para_type == 'heading':
-        level = para.get('level', 1)
-        text = extract_text_from_children(children)
+        level = para.get('level', 2)
+        children = para.get('children', [])
+        text = convert_children_to_text(children)
         return f"<h{level}>{text}</h{level}>"
     elif para_type == 'paragraph':
-        text = extract_text_with_formatting(children)
+        children = para.get('children', [])
+        text = convert_children_to_html(children)
         return f"<p>{text}</p>"
     elif para_type == 'list':
-        list_type = para.get('format', 'unordered')
+        format_type = para.get('format', 'unordered')
+        tag = 'ol' if format_type == 'ordered' else 'ul'
         items = para.get('children', [])
-        tag = 'ul' if list_type == 'unordered' else 'ol'
-        items_html = "".join([f"<li>{extract_text_from_children(item.get('children', []))}</li>" for item in items])
-        return f"<{tag}>{items_html}</{tag}>"
+        items_html = []
+        for item in items:
+            item_children = item.get('children', [])
+            item_text = convert_children_to_html(item_children)
+            items_html.append(f"<li>{item_text}</li>")
+        return f"<{tag}>{''.join(items_html)}</{tag}>"
     else:
-        text = extract_text_from_children(children)
+        children = para.get('children', [])
+        text = convert_children_to_text(children)
         return f"<p>{text}</p>"
 
-def extract_text_with_formatting(children):
-    """Extracts text from children with formatting (bold, italic, links)."""
+def convert_children_to_html(children):
+    """Convert children array to HTML string with links and formatting."""
+    import re
+    from html import escape
+    
     if not children:
         return ""
     
-    result = []
+    html_parts = []
     for child in children:
-        if isinstance(child, dict):
-            child_type = child.get('type', 'text')
-            text = child.get('text', '')
-            
-            if child_type == 'link':
-                url = child.get('url', '#')
-                link_children = child.get('children', [])
-                link_text = extract_text_from_children(link_children)
-                result.append(f'<a href="{url}">{link_text}</a>')
-            elif child_type == 'text':
-                if child.get('bold'):
-                    text = f"<strong>{text}</strong>"
-                if child.get('italic'):
-                    text = f"<em>{text}</em>"
-                result.append(text)
-            else:
-                result.append(text)
-        elif isinstance(child, str):
-            result.append(child)
+        if child.get('type') == 'text':
+            text = escape(child.get('text', ''))
+            if child.get('bold'):
+                text = f"<strong>{text}</strong>"
+            if child.get('italic'):
+                text = f"<em>{text}</em>"
+            html_parts.append(text)
+        elif child.get('type') == 'link':
+            url = child.get('url', '#')
+            link_children = child.get('children', [])
+            link_text = convert_children_to_text(link_children)
+            html_parts.append(f'<a href="{escape(url)}">{escape(link_text)}</a>')
+        else:
+            text = escape(str(child.get('text', '')))
+            html_parts.append(text)
     
-    return "".join(result)
+    return ''.join(html_parts)
 
-def extract_text_from_children(children):
-    """Simple text extraction without formatting."""
+def convert_children_to_text(children):
+    """Convert children array to plain text."""
     if not children:
         return ""
-    return "".join([child.get('text', '') if isinstance(child, dict) else str(child) for child in children])
+    
+    text_parts = []
+    for child in children:
+        if child.get('type') == 'text':
+            text_parts.append(child.get('text', ''))
+        elif child.get('type') == 'link':
+            link_children = child.get('children', [])
+            link_text = convert_children_to_text(link_children)
+            text_parts.append(link_text)
+        else:
+            text_parts.append(str(child.get('text', '')))
+    
+    return ''.join(text_parts)
 
 def convert_html_to_content_blocks(html_content, original_content):
     """
@@ -387,98 +414,161 @@ def parse_text_formatting(text):
         return []
     
     children = []
-    # Remove HTML tags but preserve content
-    text = re.sub(r'<strong[^>]*>(.*?)</strong>', r'**\1**', text, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r'<em[^>]*>(.*?)</em>', r'*\1*', text, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r'<b[^>]*>(.*?)</b>', r'**\1**', text, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r'<i[^>]*>(.*?)</i>', r'*\1*', text, flags=re.DOTALL | re.IGNORECASE)
+    # Pattern for bold
+    bold_pattern = r'<(strong|b)[^>]*>(.*?)</\1>'
+    # Pattern for italic
+    italic_pattern = r'<(em|i)[^>]*>(.*?)</\1>'
     
-    # Remove remaining HTML tags
-    clean_text = re.sub(r'<[^>]+>', '', text)
-    clean_text = unescape(clean_text)
+    # Find all formatting tags
+    positions = []
+    for match in re.finditer(bold_pattern, text, re.DOTALL | re.IGNORECASE):
+        positions.append((match.start(), match.end(), 'bold', match.group(2)))
+    for match in re.finditer(italic_pattern, text, re.DOTALL | re.IGNORECASE):
+        positions.append((match.start(), match.end(), 'italic', match.group(2)))
     
-    if clean_text.strip():
-        # Simple approach: if we found ** or *, split and create formatted text
-        parts = re.split(r'(\*\*.*?\*\*|\*.*?\*)', clean_text)
-        for part in parts:
-            if part.startswith('**') and part.endswith('**'):
-                children.append({'type': 'text', 'text': part[2:-2], 'bold': True})
-            elif part.startswith('*') and part.endswith('*') and len(part) > 2:
-                children.append({'type': 'text', 'text': part[1:-1], 'italic': True})
-            elif part:
-                children.append({'type': 'text', 'text': part})
+    if not positions:
+        # No formatting, return plain text
+        clean_text = unescape(re.sub(r'<[^>]+>', '', text)).strip()
+        if clean_text:
+            return [{'type': 'text', 'text': clean_text}]
+        return []
     
-    return children if children else [{'type': 'text', 'text': clean_text}]
+    # Sort by position
+    positions.sort(key=lambda x: x[0])
+    
+    last_pos = 0
+    for start, end, format_type, content in positions:
+        # Text before formatting
+        if start > last_pos:
+            before = text[last_pos:start]
+            clean_before = unescape(re.sub(r'<[^>]+>', '', before)).strip()
+            if clean_before:
+                children.append({'type': 'text', 'text': clean_before})
+        
+        # Formatted text
+        clean_content = unescape(re.sub(r'<[^>]+>', '', content)).strip()
+        if clean_content:
+            child = {'type': 'text', 'text': clean_content}
+            if format_type == 'bold':
+                child['bold'] = True
+            elif format_type == 'italic':
+                child['italic'] = True
+            children.append(child)
+        
+        last_pos = end
+    
+    # Text after last formatting
+    if last_pos < len(text):
+        after = text[last_pos:]
+        clean_after = unescape(re.sub(r'<[^>]+>', '', after)).strip()
+        if clean_after:
+            children.append({'type': 'text', 'text': clean_after})
+    
+    return children if children else [{'type': 'text', 'text': unescape(re.sub(r'<[^>]+>', '', text)).strip()}]
 
 def get_sitemap_context():
     """
-    Fetches ALL 800+ titles and slugs to build a 'Link Map' for the AI.
-    Returns a formatted string with all blog posts for context.
+    Fetches ALL blog post titles and slugs to build a 'Link Map' for internal linking.
     """
     try:
         # Fetch minimal data to save bandwidth
         res = supabase.table("blog_posts").select("title, slug").execute()
-        
-        if not res.data:
-            logger.warning("No blog posts found for sitemap context")
-            return ""
-        
         # Format as a compact list for the prompt
-        # Format: "Title of Post" -> /blog/slug-of-post
-        sitemap = [f"- {r.get('title', r.get('Title', 'Untitled'))} (URL: /blog/{r.get('slug', '')})" for r in res.data]
+        sitemap = [f"- {r['title']} (URL: /blog/{r['slug']})" for r in res.data]
         return "\n".join(sitemap)
     except Exception as e:
         logger.error(f"Sitemap Fetch Error: {e}")
         return ""
 
-@retry(
-    retry=retry_if_exception_type(ResourceExhausted), 
-    wait=wait_exponential(multiplier=2, min=30, max=120),  # Increased max wait to 2 minutes
-    stop=stop_after_attempt(MAX_RETRIES)
-)
-def optimize_content_with_ai(content_html, sitemap_context, current_slug, title):
+def optimize_and_restructure_content(content, sitemap_context, current_slug, title):
     """
-    Injects internal links, fixes alt text, and adds schema using Gemini.
-    Returns optimized HTML content.
+    Restructures content AND optimizes it for SEO with internal links, proper headings, etc.
+    This is the enhanced version that does both restructuring and SEO optimization.
+    """
+    import json
+    import re
+    from html import unescape
+    
+    if not content:
+        return []
+    
+    # Step 1: Convert to HTML first (for AI processing)
+    content_html = extract_html_from_content(content)
+    
+    # Step 2: Optimize with AI (add internal links, ensure proper structure)
+    try:
+        optimized_html = optimize_content_with_ai_for_restructure(
+            content_html, 
+            sitemap_context, 
+            current_slug,
+            title
+        )
+    except Exception as e:
+        logger.warning(f"AI optimization failed, using basic restructuring: {e}")
+        optimized_html = content_html
+    
+    # Step 3: Convert optimized HTML to structured blocks
+    structured_blocks = convert_html_to_content_blocks(optimized_html, [])
+    
+    # Step 4: Ensure proper heading hierarchy and add footer if needed
+    structured_blocks = enhance_seo_structure(structured_blocks, title)
+    
+    return structured_blocks
+
+@retry(
+    retry=retry_if_exception_type(ResourceExhausted),
+    wait=wait_exponential(multiplier=2, min=20, max=60),
+    stop=stop_after_attempt(3)
+)
+def optimize_content_with_ai_for_restructure(content_html, sitemap_context, current_slug, title):
+    """
+    Uses AI to optimize content with internal links, proper headings, and SEO elements.
     """
     try:
         model = get_working_model()
         
-        prompt = f"""Act as a Technical SEO Expert.
+        prompt = f"""Act as a Technical SEO Expert and Content Structuring Specialist.
 
-TASK: Optimize the following HTML Blog Content.
+TASK: Optimize and structure the following content for SEO.
 
 INPUT DATA:
-1. **Content:** Provided below.
+1. **Content:** Provided below (may be HTML, markdown, or mixed format).
 2. **Internal Link Map:** A list of all other pages on my website.
 3. **Current Page:** {current_slug} (DO NOT link to this page itself)
+4. **Page Title:** {title}
 
 INSTRUCTIONS:
-1. **Internal Linking:** Scan the content. If you see text that is semantically relevant to a page in the 'Link Map', wrap it in an <a href="/blog/slug"> tag.
-   - Add 3-8 internal links max. 
-   - Do NOT link to the current page ({current_slug}).
-   - Ensure anchor text is natural and flows with the content.
-   - Only link when there's genuine semantic relevance.
-   - IMPORTANT: Use HTML format ONLY. Use <a href="/blog/slug">text</a> format, NOT markdown [text](url) format.
+1. **Content Structure:**
+   - Ensure proper heading hierarchy: Use <h1> for main title (if not present), <h2> for main sections, <h3> for subsections
+   - Convert all content to clean HTML format
+   - Ensure paragraphs are properly wrapped in <p> tags
+   - Convert lists to proper <ul> or <ol> format
 
-2. **Image Optimization:** If you find <img> tags without 'alt' attributes, add descriptive, keyword-rich alt text that describes the image content.
+2. **Internal Linking:**
+   - Scan the content for text that is semantically relevant to pages in the 'Link Map'
+   - Wrap relevant text in <a href="/blog/slug"> tags
+   - Add 5-10 internal links naturally throughout the content
+   - DO NOT link to the current page ({current_slug})
+   - Ensure anchor text is natural and flows with the content
+   - Only link when there's genuine semantic relevance
 
-3. **Schema:** Append a valid <script type="application/ld+json"> block at the end with 'Article' schema. Include:
-   - @context: "https://schema.org"
-   - @type: "Article"
-   - headline: "{title}"
-   - datePublished: (use current date if not available)
-   - author: {{"@type": "Person", "name": "AstrologyApp Team"}}
-   - publisher: {{"@type": "Organization", "name": "AstrologyApp"}}
+3. **SEO Optimization:**
+   - Ensure first paragraph is strong and keyword-rich
+   - Add relevant keywords naturally throughout
+   - Ensure proper heading structure (H1 → H2 → H3 hierarchy)
+   - Make sure content is well-organized and readable
+
+4. **Image Optimization:**
+   - If you find <img> tags without 'alt' attributes, add descriptive, keyword-rich alt text
 
 LINK MAP (Reference Only - Use these for internal linking):
 {sitemap_context[:50000]}
 
 CONTENT TO OPTIMIZE:
-{content_html}
+{content_html[:50000]}
 
-OUTPUT: Return ONLY the updated HTML content. No markdown code blocks, no explanations. Just the HTML."""
-        
+OUTPUT: Return ONLY the optimized HTML content. No markdown code blocks, no explanations. Just clean HTML with proper structure, internal links, and SEO elements."""
+
         response = model.generate_content(prompt)
         optimized_html = response.text.strip()
         
@@ -492,13 +582,10 @@ OUTPUT: Return ONLY the updated HTML content. No markdown code blocks, no explan
             optimized_html = optimized_html.rsplit("```", 1)[0]
         
         # Convert markdown-style links [text](url) to HTML <a> tags if present
-        import re
-        markdown_link_pattern = r'\[([^\]]+)\]\(([^)]+)\)'
-        optimized_html = re.sub(markdown_link_pattern, r'<a href="\2">\1</a>', optimized_html)
+        optimized_html = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', optimized_html)
         
-        # Also handle any remaining markdown-style links with brackets only [text] - convert to plain text
-        # This handles cases where AI might output [text] without proper links
-        optimized_html = re.sub(r'\[([^\]]+)\]', r'\1', optimized_html)
+        # Remove standalone brackets [text] that aren't links
+        optimized_html = re.sub(r'\[([^\]]+)\](?!\()', r'\1', optimized_html)
         
         return optimized_html.strip()
         
@@ -506,575 +593,513 @@ OUTPUT: Return ONLY the updated HTML content. No markdown code blocks, no explan
         logger.error(f"AI Optimization Error: {e}")
         raise
 
-@retry(retry=retry_if_exception_type(ResourceExhausted), wait=wait_exponential(multiplier=2, min=20, max=60), stop=stop_after_attempt(4))
-def call_ai_rewrite(text, keywords, length):
-    prompt = f"Act as an Expert SEO Copywriter. Rewrite this text. Keywords: [{keywords}]. Length: {length} words. Keep formatting. Original: {text}"
-    try:
-        model = get_working_model()
-        return model.generate_content(prompt).text.strip()
-    except NotFound:
-        return genai.GenerativeModel("gemini-pro").generate_content(prompt).text.strip()
-
-def process_json(data, keywords):
-    if isinstance(data, dict):
-        for k, v in data.items():
-            if k in ['text', 'content', 'value', 'html'] and isinstance(v, str) and len(v) > 50:
-                try:
-                    data[k] = call_ai_rewrite(v, keywords, count_words(v))
-                    time.sleep(2)
-                except Exception as e:
-                    logger.warning(f"Failed to rewrite field {k}: {e}")
-                    pass
-            else: process_json(v, keywords)
-    elif isinstance(data, list):
-        for item in data: process_json(item, keywords)
-    return data
-
-# --- WORKER (Takes Specific IDs) ---
-def run_seo_batch_worker(row_ids):
-    logger.info(f"🚀 Background Worker processing IDs: {row_ids}")
-    
-    # Fetch the data for these specific IDs
-    response = supabase.table("blog_posts").select("*").in_("id", row_ids).execute()
-    rows = response.data
-
-    for row in rows:
-        try:
-            logger.info(f"Processing ID {row['id']}...")
-            keywords = extract_keywords(row['title'], row['content'], row['primary_keyword'])
-            original = row['content']
-            new_content = None
-            
-            if isinstance(original, (dict, list)):
-                new_content = process_json(copy.deepcopy(original), keywords)
-            elif isinstance(original, str):
-                if len(original.split()) < 50:
-                    supabase.table("blog_posts").update({"rewrite_status": "skipped"}).eq("id", row['id']).execute()
-                    continue
-                new_content = call_ai_rewrite(original, keywords, count_words(original))
-            
-            if new_content:
-                supabase.table("blog_posts").update({
-                    "content": new_content,
-                    "primary_keyword": keywords,
-                    "seo_keywords": keywords,
-                    "rewrite_status": "completed",
-                    "updated_at": "now()"
-                }).eq("id", row['id']).execute()
-                logger.info(f"✅ Finished ID {row['id']}")
-            else:
-                supabase.table("blog_posts").update({"rewrite_status": "skipped"}).eq("id", row['id']).execute()
-            
-            logger.info("⏳ Cooling down (4s)...")
-            time.sleep(4) 
-
-        except Exception as e:
-            logger.error(f"❌ Failed ID {row['id']}: {e}")
-            supabase.table("blog_posts").update({"rewrite_status": "failed"}).eq("id", row['id']).execute()
-
-# --- SEO OPTIMIZATION WORKER ---
-def run_optimization_batch(batch_id: str, batch_size: int, target_status: str = "completed"):
+def enhance_seo_structure(blocks, title):
     """
-    Background worker that optimizes blog posts with internal links, alt text, and schema.
-    Processes articles that have been rewritten (status='completed') but not yet optimized.
-    
-    Args:
-        batch_id: Unique batch identifier for tracking
-        batch_size: Number of articles to process
-        target_status: Only optimize articles with this rewrite_status
+    Enhances structured blocks with proper SEO elements:
+    - Ensures proper heading hierarchy
+    - Adds footer/CTA if needed
+    - Validates structure
     """
-    # Initialize batch tracking
-    batch_tracker[batch_id] = {
-        "status": "running",
-        "started_at": datetime.now().isoformat(),
-        "total": 0,
-        "processed": 0,
-        "failed": 0,
-        "skipped": 0,
-        "article_ids": [],
-        "errors": [],
-        "completed_at": None
-    }
+    if not blocks:
+        return blocks
     
-    logger.info(f"🚀 Starting SEO Optimization Batch {batch_id} (batch_size={batch_size}, target_status={target_status})...")
+    enhanced_blocks = []
+    has_h1 = False
+    has_h2 = False
     
-    try:
-        # 1. Get the Sitemap (Context) - Fetch once per batch
-        logger.info("📋 Fetching sitemap context...")
-        sitemap_ctx = get_sitemap_context()
-        
-        if not sitemap_ctx:
-            logger.warning("⚠️ No sitemap context available. Continuing with empty context.")
-        
-        # 2. Fetch Candidates - Articles that need optimization
-        # First, check how many articles match our criteria
-        logger.info(f"🔍 Searching for articles with rewrite_status='{target_status}'...")
-        
-        # Try to check if seo_optimized column exists by querying one article
-        test_query = supabase.table("blog_posts").select("id, seo_optimized").limit(1).execute()
-        has_seo_column = test_query.data and len(test_query.data) > 0 and 'seo_optimized' in test_query.data[0]
-        
-        logger.info(f"📊 seo_optimized column exists: {has_seo_column}")
-        
-        # Build query based on whether column exists
-        if has_seo_column:
-            # Query with seo_optimized filter
-            logger.info("🔍 Querying with seo_optimized filter...")
-            response = supabase.table("blog_posts")\
-                .select("*")\
-                .eq("rewrite_status", target_status)\
-                .or_("seo_optimized.is.null,seo_optimized.eq.false")\
-                .limit(batch_size)\
-                .execute()
-        else:
-            # If column doesn't exist, use rewrite_status only
-            logger.info("⚠️ seo_optimized column not found. Using rewrite_status filter only.")
-            response = supabase.table("blog_posts")\
-                .select("*")\
-                .eq("rewrite_status", target_status)\
-                .limit(batch_size)\
-                .execute()
-        
-        rows = response.data if response else []
-        
-        logger.info(f"📝 Query returned {len(rows)} articles")
-        
-        # Update batch tracker with total
-        batch_tracker[batch_id]["total"] = len(rows)
-        batch_tracker[batch_id]["article_ids"] = [r['id'] for r in rows]
-        
-        if not rows:
-            # Log why no articles were found
-            total_completed = supabase.table("blog_posts")\
-                .select("id", count="exact")\
-                .eq("rewrite_status", target_status)\
-                .execute()
-            total_count = total_completed.count if hasattr(total_completed, 'count') else len(total_completed.data) if total_completed.data else 0
+    # First pass: Check heading structure and fix hierarchy
+    for block in blocks:
+        if block.get('__component') == 'blog-components.rich-text':
+            body = block.get('body', [])
+            enhanced_body = []
             
-            if has_seo_column:
-                optimized_count = supabase.table("blog_posts")\
-                    .select("id", count="exact")\
-                    .eq("rewrite_status", target_status)\
-                    .eq("seo_optimized", True)\
-                    .execute()
-                opt_count = optimized_count.count if hasattr(optimized_count, 'count') else len(optimized_count.data) if optimized_count.data else 0
-                logger.info(f"ℹ️ Found {total_count} articles with status '{target_status}', {opt_count} already optimized")
-            else:
-                logger.info(f"ℹ️ Found {total_count} articles with status '{target_status}'")
-            
-            logger.info("✅ No unoptimized articles found.")
-            batch_tracker[batch_id].update({
-                "status": "completed",
-                "completed_at": datetime.now().isoformat(),
-                "message": "No articles to optimize"
-            })
-            return {"status": "done", "message": "No articles to optimize", "processed": 0, "total_available": total_count}
-        
-        logger.info(f"📝 Found {len(rows)} articles to optimize")
-        
-        processed = 0
-        failed = 0
-        skipped = 0
-        
-        for idx, row in enumerate(rows, 1):
-            try:
-                article_title = row.get('title') or row.get('Title', 'Untitled')
-                article_slug = row.get('slug', '')
-                article_id = row['id']
-                
-                logger.info(f"✨ [{idx}/{len(rows)}] Optimizing: {article_slug} (ID: {article_id})")
-                
-                # Update batch progress
-                batch_tracker[batch_id]["current_article"] = {
-                    "id": article_id,
-                    "slug": article_slug,
-                    "title": article_title,
-                    "status": "processing"
-                }
-                
-                # Extract HTML from content
-                original_content = row.get('content', '')
-                html_content = extract_html_from_content(original_content)
-                
-                if not html_content or len(html_content.strip()) < 50:
-                    logger.warning(f"⚠️ Skipping ID {article_id}: Content too short or empty")
-                    skipped += 1
-                    batch_tracker[batch_id]["skipped"] = skipped
-                    continue
-                
-                # Call AI to optimize with rate limiting
-                try:
-                    optimized_html = optimize_content_with_ai(
-                        html_content, 
-                        sitemap_ctx, 
-                        article_slug,
-                        article_title
-                    )
-                except ResourceExhausted as rate_error:
-                    logger.warning(f"⚠️ Rate limit hit for ID {article_id}, waiting longer...")
-                    # Wait longer on rate limit
-                    time.sleep(60)  # Wait 1 minute on rate limit
-                    # Retry once
-                    try:
-                        optimized_html = optimize_content_with_ai(
-                            html_content, 
-                            sitemap_ctx, 
-                            article_slug,
-                            article_title
-                        )
-                    except Exception as retry_error:
-                        raise retry_error
-                
-                # Convert optimized HTML back to structured format if original was structured
-                original_content = row.get('content', '')
-                if isinstance(original_content, (dict, list)) or (isinstance(original_content, str) and (original_content.strip().startswith('[') or original_content.strip().startswith('{'))):
-                    # Original was structured, convert HTML back to structured format
-                    try:
-                        optimized_content = convert_html_to_content_blocks(optimized_html, original_content)
-                    except Exception as conv_error:
-                        logger.warning(f"⚠️ Failed to convert HTML back to structured format for ID {article_id}: {conv_error}")
-                        # Fallback: store as HTML string (frontend will handle it)
-                        optimized_content = optimized_html
+            for item in body:
+                if item.get('type') == 'heading':
+                    level = item.get('level', 2)
+                    
+                    # Ensure we have at least one H2 if no H1
+                    if level == 1:
+                        has_h1 = True
+                    elif level == 2:
+                        has_h2 = True
+                    
+                    # If first heading is H3 or below, promote to H2
+                    if not has_h1 and not has_h2 and level > 2:
+                        item['level'] = 2
+                        has_h2 = True
+                    
+                    enhanced_body.append(item)
                 else:
-                    # Original was plain text/HTML, keep as HTML
-                    optimized_content = optimized_html
-                
-                # Update DB - try to set seo_optimized, but handle if column doesn't exist
-                update_data = {
-                    "content": optimized_content,
-                    "updated_at": "now()"
-                }
-                
-                # Try to set seo_optimized flag if column exists
-                try:
-                    update_data["seo_optimized"] = True
-                    supabase.table("blog_posts").update(update_data).eq("id", article_id).execute()
-                except Exception as col_error:
-                    # If column doesn't exist, just update content
-                    logger.debug(f"seo_optimized column update failed (may not exist): {col_error}")
-                    supabase.table("blog_posts").update({
-                        "content": optimized_html,
-                        "updated_at": "now()"
-                    }).eq("id", article_id).execute()
-                
-                processed += 1
-                batch_tracker[batch_id]["processed"] = processed
-                logger.info(f"✅ [{idx}/{len(rows)}] Done: {article_slug} (ID: {article_id})")
-                
-                # Rate limiting: Wait between API calls (except for last article)
-                if idx < len(rows):
-                    logger.info(f"⏳ Rate limiting: Waiting {GEMINI_RATE_LIMIT_DELAY}s before next article...")
-                    time.sleep(GEMINI_RATE_LIMIT_DELAY)
-                
-            except Exception as e:
-                failed += 1
-                error_msg = str(e)
-                logger.error(f"❌ Failed ID {row['id']}: {error_msg}", exc_info=True)
-                batch_tracker[batch_id]["failed"] = failed
-                batch_tracker[batch_id]["errors"].append({
-                    "article_id": row['id'],
-                    "slug": row.get('slug', ''),
-                    "error": error_msg
+                    enhanced_body.append(item)
+            
+            block['body'] = enhanced_body
+        
+        enhanced_blocks.append(block)
+    
+    # Add footer/CTA block if content is substantial
+    total_blocks = sum(
+        len(b.get('body', [])) if b.get('__component') == 'blog-components.rich-text' else 1
+        for b in enhanced_blocks
+    )
+    
+    # Add CTA/footer if we have substantial content (5+ paragraphs)
+    if total_blocks >= 5:
+        # Check if footer already exists
+        has_footer = any(
+            b.get('__component') == 'blog-components.cta-block' 
+            for b in enhanced_blocks
+        )
+        
+        if not has_footer:
+            # Add a simple CTA block
+            enhanced_blocks.append({
+                '__component': 'blog-components.cta-block',
+                'heading': 'Get Personalized Guidance',
+                'text': 'Connect with our expert astrologers for personalized insights and remedies tailored to your birth chart.',
+                'buttonText': 'Book Consultation',
+                'buttonLink': '/consultation'
+            })
+    
+    return enhanced_blocks
+
+def restructure_content_to_blocks(content, use_seo_optimization=False, sitemap_context=None, current_slug=None, title=None):
+    """
+    Converts any content format (HTML, markdown, plain text) to structured content blocks.
+    If use_seo_optimization is True, also optimizes for SEO with internal links.
+    """
+    import json
+    import re
+    from html import unescape
+    
+    if not content:
+        return []
+    
+    # If SEO optimization is requested, use the enhanced version
+    if use_seo_optimization and sitemap_context and current_slug and title:
+        return optimize_and_restructure_content(content, sitemap_context, current_slug, title)
+    
+    # If already structured, return as-is
+    if isinstance(content, list):
+        # Check if it's already in the correct format
+        if content and isinstance(content[0], dict) and content[0].get('__component'):
+            return content
+        # Otherwise, try to convert
+    elif isinstance(content, dict):
+        # Check if it's already structured
+        if content.get('__component') or content.get('contentBlocks'):
+            return [content] if content.get('__component') else content.get('contentBlocks', [])
+    
+    # Convert to string for processing
+    content_str = str(content)
+    
+    # Check if it's JSON string
+    if isinstance(content, str):
+        try:
+            parsed = json.loads(content)
+            if isinstance(parsed, (dict, list)):
+                # Recursively process parsed JSON
+                return restructure_content_to_blocks(parsed, use_seo_optimization, sitemap_context, current_slug, title)
+        except (json.JSONDecodeError, ValueError):
+            pass
+    
+    # Check if content has HTML tags
+    has_html = re.search(r'<[a-z][\s\S]*>', content_str, re.IGNORECASE)
+    
+    if has_html:
+        # Parse HTML
+        return convert_html_to_content_blocks(content_str, [])
+    
+    # Check if content has markdown (headings, lists, etc.)
+    has_markdown = re.search(r'^#{1,6}\s+|^[-*+]\s+|^\d+\.\s+', content_str, re.MULTILINE)
+    
+    if has_markdown:
+        # Parse markdown
+        return parse_markdown_to_blocks(content_str)
+    
+    # Plain text - convert to paragraphs
+    return parse_plain_text_to_blocks(content_str)
+
+def parse_markdown_to_blocks(markdown):
+    """Parse markdown to structured blocks."""
+    import re
+    
+    blocks = []
+    lines = markdown.split('\n')
+    current_paragraph = []
+    current_list = []
+    list_type = None
+    
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        
+        if not line:
+            # Empty line - end current paragraph/list
+            if current_paragraph:
+                blocks.append({
+                    'type': 'paragraph',
+                    'children': [{'type': 'text', 'text': ' '.join(current_paragraph)}]
                 })
-                # Shorter wait on error
-                time.sleep(5)
+                current_paragraph = []
+            if current_list:
+                blocks.append({
+                    'type': 'list',
+                    'format': list_type,
+                    'children': [{'children': [{'type': 'text', 'text': item}]} for item in current_list]
+                })
+                current_list = []
+                list_type = None
+            i += 1
+            continue
         
-        logger.info(f"🎉 Batch {batch_id} complete! Processed: {processed}, Failed: {failed}, Skipped: {skipped}")
+        # Heading
+        heading_match = re.match(r'^(#{1,6})\s+(.+)$', line)
+        if heading_match:
+            # Save any pending content
+            if current_paragraph:
+                blocks.append({
+                    'type': 'paragraph',
+                    'children': [{'type': 'text', 'text': ' '.join(current_paragraph)}]
+                })
+                current_paragraph = []
+            if current_list:
+                blocks.append({
+                    'type': 'list',
+                    'format': list_type,
+                    'children': [{'children': [{'type': 'text', 'text': item}]} for item in current_list]
+                })
+                current_list = []
+                list_type = None
+            
+            level = len(heading_match.group(1))
+            text = heading_match.group(2).strip()
+            # Parse links in heading
+            children = parse_markdown_links(text)
+            blocks.append({
+                'type': 'heading',
+                'level': level,
+                'children': children
+            })
+            i += 1
+            continue
         
-        # Update batch tracker
-        batch_tracker[batch_id].update({
-            "status": "completed",
-            "processed": processed,
-            "failed": failed,
-            "skipped": skipped,
-            "completed_at": datetime.now().isoformat(),
-            "current_article": None
+        # Unordered list
+        ul_match = re.match(r'^[-*+]\s+(.+)$', line)
+        if ul_match:
+            if current_paragraph:
+                blocks.append({
+                    'type': 'paragraph',
+                    'children': [{'type': 'text', 'text': ' '.join(current_paragraph)}]
+                })
+                current_paragraph = []
+            if list_type != 'unordered':
+                if current_list:
+                    blocks.append({
+                        'type': 'list',
+                        'format': list_type,
+                        'children': [{'children': [{'type': 'text', 'text': item}]} for item in current_list]
+                    })
+                current_list = []
+            list_type = 'unordered'
+            text = ul_match.group(1).strip()
+            children = parse_markdown_links(text)
+            current_list.append(children[0]['text'] if children and children[0].get('type') == 'text' else text)
+            i += 1
+            continue
+        
+        # Ordered list
+        ol_match = re.match(r'^\d+\.\s+(.+)$', line)
+        if ol_match:
+            if current_paragraph:
+                blocks.append({
+                    'type': 'paragraph',
+                    'children': [{'type': 'text', 'text': ' '.join(current_paragraph)}]
+                })
+                current_paragraph = []
+            if list_type != 'ordered':
+                if current_list:
+                    blocks.append({
+                        'type': 'list',
+                        'format': list_type,
+                        'children': [{'children': [{'type': 'text', 'text': item}]} for item in current_list]
+                    })
+                current_list = []
+            list_type = 'ordered'
+            text = ol_match.group(1).strip()
+            children = parse_markdown_links(text)
+            current_list.append(children[0]['text'] if children and children[0].get('type') == 'text' else text)
+            i += 1
+            continue
+        
+        # Regular text
+        if current_list:
+            # End list, start paragraph
+            blocks.append({
+                'type': 'list',
+                'format': list_type,
+                'children': [{'children': [{'type': 'text', 'text': item}]} for item in current_list]
+            })
+            current_list = []
+            list_type = None
+        
+        # Parse links in line
+        children = parse_markdown_links(line)
+        if children:
+            # If has links, create paragraph with links
+            current_paragraph.append(' '.join([c.get('text', '') if c.get('type') == 'text' else c.get('children', [{}])[0].get('text', '') for c in children]))
+        else:
+            current_paragraph.append(line)
+        
+        i += 1
+    
+    # Add remaining content
+    if current_paragraph:
+        children = parse_markdown_links(' '.join(current_paragraph))
+        blocks.append({
+            'type': 'paragraph',
+            'children': children if children else [{'type': 'text', 'text': ' '.join(current_paragraph)}]
+        })
+    if current_list:
+        blocks.append({
+            'type': 'list',
+            'format': list_type,
+            'children': [{'children': [{'type': 'text', 'text': item}]} for item in current_list]
+        })
+    
+    # Wrap in contentBlocks structure
+    if blocks:
+        return [{
+            '__component': 'blog-components.rich-text',
+            'body': blocks
+        }]
+    
+    return []
+
+def parse_markdown_links(text):
+    """Parse markdown-style links [text](url) to structured children."""
+    import re
+    
+    children = []
+    # Pattern for markdown links: [text](url)
+    link_pattern = r'\[([^\]]+)\]\(([^)]+)\)'
+    
+    last_pos = 0
+    for match in re.finditer(link_pattern, text):
+        # Text before link
+        before = text[last_pos:match.start()]
+        if before:
+            children.append({'type': 'text', 'text': before})
+        
+        # Link
+        link_text = match.group(1)
+        link_url = match.group(2)
+        children.append({
+            'type': 'link',
+            'url': link_url,
+            'children': [{'type': 'text', 'text': link_text}]
         })
         
-        return {"status": "completed", "processed": processed, "failed": failed, "skipped": skipped}
-        
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"❌ Batch {batch_id} Error: {error_msg}", exc_info=True)
-        
-        # Update batch tracker with error
-        batch_tracker[batch_id].update({
-            "status": "error",
-            "completed_at": datetime.now().isoformat(),
-            "error": error_msg
-        })
-        
-        return {"status": "error", "message": error_msg}
-
-# --- ENDPOINTS ---
-
-@router.post("/rewrite-batch")
-def trigger_seo_rewrite(req: RewriteRequest, background_tasks: BackgroundTasks, x_admin_key: str = Header(None)):
-    if x_admin_key != ADMIN_SECRET: raise HTTPException(status_code=403, detail="Unauthorized")
+        last_pos = match.end()
     
-    # 1. Synchronous: Find Pending Rows
-    response = supabase.table("blog_posts").select("id").eq("rewrite_status", "pending").order("id").limit(req.batch_size).execute()
-    rows = response.data
+    # Text after last link
+    after = text[last_pos:]
+    if after:
+        children.append({'type': 'text', 'text': after})
     
-    if not rows:
-        return {"status": "Done", "message": "No pending articles.", "ids": []}
+    return children if children else [{'type': 'text', 'text': text}]
 
-    row_ids = [r['id'] for r in rows]
-
-    # 2. Synchronous: Lock them as 'processing' immediately
-    supabase.table("blog_posts").update({"rewrite_status": "processing"}).in_("id", row_ids).execute()
-
-    # 3. Asynchronous: Start work
-    background_tasks.add_task(run_seo_batch_worker, row_ids)
+def parse_plain_text_to_blocks(text):
+    """Parse plain text to structured blocks."""
+    if not text:
+        return []
     
-    return {"status": "Job Started", "ids": row_ids, "message": f"Processing IDs: {row_ids}"}
-
-@router.post("/check-batch")
-def check_batch_status(req: StatusRequest, x_admin_key: str = Header(None)):
-    if x_admin_key != ADMIN_SECRET: raise HTTPException(status_code=403, detail="Unauthorized")
+    # Split by double newlines (paragraphs)
+    paragraphs = re.split(r'\n{2,}', text.strip())
     
-    if not req.ids: return {"pending_count": 0, "failed_count": 0}
-
-    # Check how many of these IDs are still 'processing'
-    res = supabase.table("blog_posts").select("rewrite_status").in_("id", req.ids).execute()
+    blocks = []
+    for para in paragraphs:
+        if para.strip():
+            # Check for headings (all caps or specific patterns)
+            lines = para.split('\n')
+            first_line = lines[0].strip()
+            
+            # Simple heuristic: if first line is short and ends without period, might be heading
+            if len(first_line) < 100 and not first_line.endswith('.') and len(lines) > 1:
+                blocks.append({
+                    'type': 'heading',
+                    'level': 2,
+                    'children': [{'type': 'text', 'text': first_line}]
+                })
+                # Rest as paragraph
+                rest = '\n'.join(lines[1:]).strip()
+                if rest:
+                    blocks.append({
+                        'type': 'paragraph',
+                        'children': [{'type': 'text', 'text': rest}]
+                    })
+            else:
+                blocks.append({
+                    'type': 'paragraph',
+                    'children': [{'type': 'text', 'text': para.strip()}]
+                })
     
-    processing = sum(1 for r in res.data if r['rewrite_status'] == 'processing')
-    failed = sum(1 for r in res.data if r['rewrite_status'] == 'failed')
-    completed = sum(1 for r in res.data if r['rewrite_status'] == 'completed')
+    if blocks:
+        return [{
+            '__component': 'blog-components.rich-text',
+            'body': blocks
+        }]
     
-    return {
-        "total": len(req.ids),
-        "processing": processing,
-        "failed": failed,
-        "completed": completed,
-        "is_done": processing == 0
-    }
+    return []
 
-@router.post("/optimize-batch")
-def trigger_seo_polish(
-    req: OptimizationRequest, 
-    background_tasks: BackgroundTasks, 
+# --- RESTRUCTURE ENDPOINT ---
+@router.post("/restructure-content")
+def restructure_content_batch(
+    req: RestructureRequest,
+    background_tasks: BackgroundTasks,
     x_admin_key: str = Header(None)
 ):
     """
-    Triggers SEO optimization batch job.
-    Adds internal links, image alt text, and JSON-LD schema to blog articles.
-    
-    Returns a batch_id that can be used to track progress.
+    Restructures content column from HTML/markdown to proper structured content blocks.
+    This fixes rendering issues where content shows as raw markdown/HTML.
     """
     if x_admin_key != ADMIN_SECRET:
         raise HTTPException(status_code=403, detail="Unauthorized")
     
     try:
-        # Generate unique batch ID
-        batch_id = str(uuid.uuid4())
+        # Build query
+        query = supabase.table("blog_posts").select("*")
         
-        if req.run_sync:
-            # Run synchronously for immediate feedback (testing only)
-            logger.info(f"🔄 Running optimization synchronously (testing mode) - Batch ID: {batch_id}")
-            result = run_optimization_batch(batch_id, req.batch_size, req.target_status)
-            return {
-                "status": "completed",
-                "batch_id": batch_id,
-                "message": f"SEO optimization completed synchronously.",
-                "result": result
-            }
+        if req.article_ids:
+            # Restructure specific articles
+            query = query.in_("id", req.article_ids)
         else:
-            # Run asynchronously (production)
-            background_tasks.add_task(run_optimization_batch, batch_id, req.batch_size, req.target_status)
+            # Get articles that need restructuring (have content but might be malformed)
+            query = query.limit(req.batch_size)
+        
+        response = query.execute()
+        articles = response.data if response else []
+        
+        if not articles:
             return {
-                "status": "queued", 
-                "batch_id": batch_id,
-                "message": f"SEO optimization queued. Processing {req.batch_size} articles with status '{req.target_status}'.", 
-                "batch_size": req.batch_size,
-                "check_status_url": f"/api/seo/batch-status/{batch_id}",
-                "note": "Use the batch_id to check status. Task is running in background."
+                "status": "no_articles",
+                "message": "No articles found to restructure.",
+                "count": 0
             }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in trigger_seo_polish: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to trigger optimization: {str(e)}")
-
-@router.get("/batch-status/{batch_id}")
-def get_batch_status(batch_id: str, x_admin_key: str = Header(None)):
-    """
-    Get the status of a running or completed optimization batch.
-    
-    Returns:
-        - status: "running", "completed", "error"
-        - progress: processed/total
-        - details: article IDs, errors, etc.
-    """
-    if x_admin_key != ADMIN_SECRET:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    
-    if batch_id not in batch_tracker:
-        raise HTTPException(status_code=404, detail=f"Batch {batch_id} not found. It may have expired or never existed.")
-    
-    batch_info = batch_tracker[batch_id].copy()
-    
-    # Calculate progress percentage
-    if batch_info["total"] > 0:
-        batch_info["progress_percentage"] = round(
-            (batch_info["processed"] + batch_info["failed"] + batch_info["skipped"]) / batch_info["total"] * 100, 
-            2
-        )
-    else:
-        batch_info["progress_percentage"] = 0
-    
-    # Calculate elapsed time
-    if batch_info.get("started_at"):
-        started = datetime.fromisoformat(batch_info["started_at"])
-        if batch_info.get("completed_at"):
-            completed = datetime.fromisoformat(batch_info["completed_at"])
-            elapsed = (completed - started).total_seconds()
-        else:
-            elapsed = (datetime.now() - started).total_seconds()
-        batch_info["elapsed_seconds"] = round(elapsed, 2)
-    
-    return batch_info
-
-@router.get("/optimize-status")
-def get_seo_optimization_status(x_admin_key: str = Header(None)):
-    """
-    Get overall SEO optimization status across all articles.
-    Returns counts of optimized vs unoptimized articles.
-    """
-    if x_admin_key != ADMIN_SECRET:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    
-    try:
-        # Try to get counts with seo_optimized column
-        try:
-            # Total articles
-            total_res = supabase.table("blog_posts").select("id", count="exact").execute()
-            total_count = total_res.count if hasattr(total_res, 'count') else len(total_res.data) if total_res.data else 0
+        
+        # Get sitemap context for SEO optimization (if enabled)
+        sitemap_ctx = ""
+        if req.seo_optimize:
+            logger.info("📋 Fetching sitemap context for SEO optimization...")
+            sitemap_ctx = get_sitemap_context()
+            if not sitemap_ctx:
+                logger.warning("⚠️ No sitemap context available. SEO optimization may be limited.")
+        
+        if req.dry_run:
+            # Dry run - just show what would be changed
+            results = []
+            for article in articles:
+                original = article.get('content', '')
+                slug = article.get('slug', '')
+                title = article.get('title', '')
+                
+                restructured = restructure_content_to_blocks(
+                    original,
+                    use_seo_optimization=req.seo_optimize,
+                    sitemap_context=sitemap_ctx if req.seo_optimize else None,
+                    current_slug=slug,
+                    title=title
+                )
+                
+                # Count internal links in restructured content
+                internal_links_count = 0
+                if restructured:
+                    for block in restructured:
+                        if block.get('__component') == 'blog-components.rich-text':
+                            body = block.get('body', [])
+                            for item in body:
+                                if item.get('type') == 'paragraph' or item.get('type') == 'heading':
+                                    children = item.get('children', [])
+                                    for child in children:
+                                        if child.get('type') == 'link' and child.get('url', '').startswith('/blog/'):
+                                            internal_links_count += 1
+                
+                results.append({
+                    "id": article.get('id'),
+                    "slug": slug,
+                    "title": title,
+                    "original_type": type(original).__name__,
+                    "restructured_blocks": len(restructured),
+                    "internal_links_added": internal_links_count if req.seo_optimize else 0,
+                    "preview": restructured[:1] if restructured else []
+                })
             
-            # Optimized articles
-            optimized_res = supabase.table("blog_posts").select("id", count="exact").eq("seo_optimized", True).execute()
-            optimized_count = optimized_res.count if hasattr(optimized_res, 'count') else len(optimized_res.data) if optimized_res.data else 0
-            
-            # Unoptimized articles (completed but not optimized)
-            unoptimized_res = supabase.table("blog_posts").select("id", count="exact").eq("rewrite_status", "completed").is_("seo_optimized", "null").execute()
-            unoptimized_count = unoptimized_res.count if hasattr(unoptimized_res, 'count') else len(unoptimized_res.data) if unoptimized_res.data else 0
-            
-            # Fallback: if seo_optimized column doesn't exist, count by rewrite_status
-            if optimized_count == 0 and unoptimized_count == 0:
-                completed_res = supabase.table("blog_posts").select("id", count="exact").eq("rewrite_status", "completed").execute()
-                completed_count = completed_res.count if hasattr(completed_res, 'count') else len(completed_res.data) if completed_res.data else 0
-                unoptimized_count = completed_count
-        except Exception as e:
-            logger.debug(f"Error querying seo_optimized column: {e}")
-            # Fallback to rewrite_status only
-            total_res = supabase.table("blog_posts").select("id", count="exact").execute()
-            total_count = total_res.count if hasattr(total_res, 'count') else len(total_res.data) if total_res.data else 0
-            
-            completed_res = supabase.table("blog_posts").select("id", count="exact").eq("rewrite_status", "completed").execute()
-            completed_count = completed_res.count if hasattr(completed_res, 'count') else len(completed_res.data) if completed_res.data else 0
-            
-            optimized_count = 0
-            unoptimized_count = completed_count
+            return {
+                "status": "dry_run",
+                "message": f"Would restructure {len(articles)} articles (dry run)" + (" with SEO optimization" if req.seo_optimize else ""),
+                "count": len(articles),
+                "seo_optimized": req.seo_optimize,
+                "articles": results
+            }
+        
+        # Actually restructure
+        restructured_count = 0
+        errors = []
+        
+        # Rate limiting for AI calls
+        for idx, article in enumerate(articles):
+            try:
+                article_id = article.get('id')
+                original_content = article.get('content', '')
+                slug = article.get('slug', '')
+                title = article.get('title', '')
+                
+                logger.info(f"🔄 Restructuring article ID {article_id}: {slug}")
+                
+                # Restructure content (with SEO optimization if enabled)
+                restructured_blocks = restructure_content_to_blocks(
+                    original_content,
+                    use_seo_optimization=req.seo_optimize,
+                    sitemap_context=sitemap_ctx if req.seo_optimize else None,
+                    current_slug=slug,
+                    title=title
+                )
+                
+                if restructured_blocks:
+                    # Update database
+                    supabase.table("blog_posts").update({
+                        "content": restructured_blocks,
+                        "updated_at": "now()"
+                    }).eq("id", article_id).execute()
+                    
+                    restructured_count += 1
+                    logger.info(f"✅ Restructured article ID {article_id}: {slug}")
+                    
+                    # Rate limiting for AI calls
+                    if req.seo_optimize and idx < len(articles) - 1:
+                        time.sleep(GEMINI_RATE_LIMIT_DELAY)
+                else:
+                    logger.warning(f"⚠️ No blocks generated for article ID {article_id}")
+                    errors.append({
+                        "id": article_id,
+                        "error": "No blocks generated"
+                    })
+                    
+            except Exception as e:
+                logger.error(f"❌ Failed to restructure article ID {article.get('id')}: {e}")
+                errors.append({
+                    "id": article.get('id'),
+                    "error": str(e)
+                })
+                # Continue with next article even if one fails
         
         return {
-            "total_articles": total_count,
-            "optimized": optimized_count,
-            "unoptimized": unoptimized_count,
-            "optimization_percentage": round((optimized_count / total_count * 100), 2) if total_count > 0 else 0,
-            "ready_for_optimization": unoptimized_count,
-            "note": "seo_optimized column exists" if optimized_count > 0 or unoptimized_count > 0 else "Using rewrite_status only (seo_optimized column may not exist)"
+            "status": "completed",
+            "message": f"Restructured {restructured_count} out of {len(articles)} articles",
+            "restructured": restructured_count,
+            "total": len(articles),
+            "errors": errors if errors else None
         }
+        
     except Exception as e:
-        logger.error(f"Error getting SEO optimization status: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get status: {str(e)}")
-
-@router.get("/optimize-status/{article_id}")
-def get_article_seo_status(article_id: int, x_admin_key: str = Header(None)):
-    """
-    Get SEO optimization status for a specific article by ID.
-    """
-    if x_admin_key != ADMIN_SECRET:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    
-    try:
-        res = supabase.table("blog_posts").select("id, slug, title, seo_optimized, rewrite_status, updated_at").eq("id", article_id).single().execute()
-        
-        if not res.data:
-            raise HTTPException(status_code=404, detail="Article not found")
-        
-        article = res.data
-        return {
-            "id": article.get("id"),
-            "slug": article.get("slug"),
-            "title": article.get("title") or article.get("Title", "Untitled"),
-            "seo_optimized": article.get("seo_optimized", False),
-            "rewrite_status": article.get("rewrite_status"),
-            "last_updated": article.get("updated_at"),
-            "is_ready": article.get("rewrite_status") == "completed" and not article.get("seo_optimized", False)
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting article SEO status: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get article status: {str(e)}")
-
-@router.get("/optimize-diagnostic")
-def diagnostic_seo_optimization(x_admin_key: str = Header(None)):
-    """
-    Diagnostic endpoint to check why optimization might not be working.
-    Returns detailed information about articles and database state.
-    """
-    if x_admin_key != ADMIN_SECRET:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    
-    try:
-        # Check if seo_optimized column exists
-        test_query = supabase.table("blog_posts").select("id, seo_optimized").limit(1).execute()
-        has_seo_column = test_query.data and len(test_query.data) > 0 and 'seo_optimized' in test_query.data[0]
-        
-        # Get counts by rewrite_status
-        all_statuses = supabase.table("blog_posts").select("rewrite_status").execute()
-        status_counts = {}
-        for row in all_statuses.data:
-            status = row.get('rewrite_status', 'unknown')
-            status_counts[status] = status_counts.get(status, 0) + 1
-        
-        # Get completed articles
-        completed_res = supabase.table("blog_posts")\
-            .select("id, slug, title, seo_optimized")\
-            .eq("rewrite_status", "completed")\
-            .limit(10)\
-            .execute()
-        
-        completed_articles = completed_res.data if completed_res else []
-        
-        # Count optimized if column exists
-        optimized_count = 0
-        if has_seo_column:
-            opt_res = supabase.table("blog_posts")\
-                .select("id", count="exact")\
-                .eq("seo_optimized", True)\
-                .execute()
-            optimized_count = opt_res.count if hasattr(opt_res, 'count') else len(opt_res.data) if opt_res.data else 0
-        
-        return {
-            "database_state": {
-                "seo_optimized_column_exists": has_seo_column,
-                "total_articles": len(all_statuses.data) if all_statuses.data else 0
-            },
-            "status_breakdown": status_counts,
-            "completed_articles": {
-                "total": len(completed_articles),
-                "sample": completed_articles[:5],  # Show first 5
-                "optimized_count": optimized_count
-            },
-            "recommendations": [
-                "Run migration to add seo_optimized column" if not has_seo_column else "Column exists ✓",
-                f"Found {status_counts.get('completed', 0)} articles with rewrite_status='completed'",
-                f"Found {optimized_count} articles already optimized" if has_seo_column else "Cannot check optimized count (column missing)",
-                "Use /api/seo/optimize-batch with run_sync=true for testing" if status_counts.get('completed', 0) > 0 else "No articles ready for optimization"
-            ]
-        }
-    except Exception as e:
-        logger.error(f"Error in diagnostic: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Diagnostic failed: {str(e)}")
+        logger.error(f"Error in restructure_content_batch: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to restructure content: {str(e)}")
