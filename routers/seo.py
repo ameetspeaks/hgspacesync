@@ -1103,3 +1103,240 @@ def restructure_content_batch(
     except Exception as e:
         logger.error(f"Error in restructure_content_batch: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to restructure content: {str(e)}")
+
+# --- SEO OPTIMIZATION ENDPOINT ---
+def optimize_content_with_ai(content_html, sitemap_context, current_slug, title):
+    """
+    Uses AI to optimize content with internal links, alt text, and schema.
+    This is the original SEO optimization function.
+    """
+    try:
+        model = get_working_model()
+        
+        prompt = f"""Act as a Technical SEO Expert.
+
+TASK: Optimize the following HTML Blog Content.
+
+INPUT DATA:
+1. **Content:** Provided below.
+2. **Internal Link Map:** A list of all other pages on my website.
+3. **Current Page:** {current_slug} (DO NOT link to this page itself)
+4. **Page Title:** {title}
+
+INSTRUCTIONS:
+1. **Internal Linking:** Scan the content. If you see text that is semantically relevant to a page in the 'Link Map', wrap it in an <a href="/blog/slug"> tag.
+   - Add 3-8 internal links max.
+   - Do NOT link to the current page ({current_slug}).
+   - Ensure anchor text is natural.
+
+2. **Image Optimization:** If you find <img> tags without 'alt' attributes, add descriptive, keyword-rich alt text.
+
+3. **Schema:** Append a valid <script type="application/ld+json"> block at the end with 'Article' schema.
+
+LINK MAP (Reference Only):
+{sitemap_context[:50000]}
+
+CONTENT TO OPTIMIZE:
+{content_html[:50000]}
+
+OUTPUT: Return ONLY the updated HTML content. No markdown ticks, no explanations."""
+
+        response = model.generate_content(prompt)
+        optimized_html = response.text.strip()
+        
+        # Clean up markdown code blocks if present
+        optimized_html = optimized_html.replace("```html", "").replace("```", "").strip()
+        
+        # Convert markdown-style links [text](url) to HTML <a> tags if present
+        optimized_html = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', optimized_html)
+        
+        return optimized_html.strip()
+        
+    except Exception as e:
+        logger.error(f"AI Optimization Error: {e}")
+        raise
+
+def run_optimization_batch(batch_id, batch_size, target_status):
+    """
+    Background worker for SEO optimization batch processing.
+    """
+    try:
+        logger.info(f"🚀 Starting SEO Optimization Batch {batch_id}...")
+        
+        # Update batch status
+        batch_tracker[batch_id] = {
+            "status": "running",
+            "started_at": datetime.now().isoformat(),
+            "processed": 0,
+            "total": 0,
+            "errors": []
+        }
+        
+        # 1. Get the Sitemap (Context)
+        sitemap_ctx = get_sitemap_context()
+        if not sitemap_ctx:
+            logger.warning("⚠️ No sitemap context available. Internal linking may be limited.")
+        
+        # 2. Check if seo_optimized column exists
+        try:
+            # Try to fetch one row to check column existence
+            test_res = supabase.table("blog_posts").select("id, seo_optimized").limit(1).execute()
+        except Exception as e:
+            logger.warning(f"⚠️ seo_optimized column may not exist: {e}")
+            # Continue anyway - we'll handle it
+        
+        # 3. Fetch Candidates
+        query = supabase.table("blog_posts").select("*")
+        
+        # Filter by target_status if provided
+        if target_status:
+            query = query.eq("rewrite_status", target_status)
+        
+        # Filter out already optimized articles (if column exists)
+        try:
+            query = query.eq("seo_optimized", False)
+        except:
+            # Column might not exist, continue without filter
+            pass
+        
+        query = query.limit(batch_size)
+        
+        response = query.execute()
+        rows = response.data if response else []
+        
+        if not rows:
+            batch_tracker[batch_id]["status"] = "completed"
+            batch_tracker[batch_id]["message"] = "No unoptimized articles found."
+            logger.info("✅ No unoptimized articles found.")
+            return
+        
+        batch_tracker[batch_id]["total"] = len(rows)
+        
+        # 4. Process each article
+        for idx, row in enumerate(rows):
+            try:
+                article_id = row.get('id')
+                slug = row.get('slug', '')
+                title = row.get('title', '')
+                content = row.get('content', '')
+                
+                logger.info(f"✨ Optimizing: {slug} (ID: {article_id})")
+                
+                # Extract HTML from content
+                content_html = extract_html_from_content(content)
+                
+                # Optimize with AI
+                optimized_html = optimize_content_with_ai(content_html, sitemap_ctx, slug, title)
+                
+                # Convert optimized HTML back to structured blocks if original was structured
+                # Check if original content was structured
+                is_structured = isinstance(content, (dict, list)) or (
+                    isinstance(content, str) and 
+                    (content.strip().startswith('[') or content.strip().startswith('{'))
+                )
+                
+                if is_structured:
+                    # Convert back to structured blocks
+                    optimized_blocks = convert_html_to_content_blocks(optimized_html, content)
+                    final_content = optimized_blocks
+                else:
+                    # Keep as HTML string
+                    final_content = optimized_html
+                
+                # Update database
+                update_data = {
+                    "content": final_content,
+                    "updated_at": "now()"
+                }
+                
+                # Try to set seo_optimized flag if column exists
+                try:
+                    update_data["seo_optimized"] = True
+                except:
+                    pass
+                
+                supabase.table("blog_posts").update(update_data).eq("id", article_id).execute()
+                
+                batch_tracker[batch_id]["processed"] += 1
+                logger.info(f"✅ Done: {slug}")
+                
+                # Rate limiting
+                if idx < len(rows) - 1:
+                    time.sleep(GEMINI_RATE_LIMIT_DELAY)
+                    
+            except Exception as e:
+                error_msg = f"Failed ID {row.get('id')}: {str(e)}"
+                logger.error(f"❌ {error_msg}")
+                batch_tracker[batch_id]["errors"].append({
+                    "id": row.get('id'),
+                    "slug": row.get('slug'),
+                    "error": str(e)
+                })
+                time.sleep(5)  # Shorter delay on error
+        
+        # Mark batch as completed
+        batch_tracker[batch_id]["status"] = "completed"
+        batch_tracker[batch_id]["completed_at"] = datetime.now().isoformat()
+        batch_tracker[batch_id]["message"] = f"Processed {batch_tracker[batch_id]['processed']} out of {batch_tracker[batch_id]['total']} articles"
+        
+        logger.info(f"✅ Batch {batch_id} completed!")
+        
+    except Exception as e:
+        logger.error(f"❌ Batch {batch_id} Error: {e}", exc_info=True)
+        batch_tracker[batch_id]["status"] = "failed"
+        batch_tracker[batch_id]["error"] = str(e)
+        batch_tracker[batch_id]["completed_at"] = datetime.now().isoformat()
+
+@router.post("/optimize-batch")
+def trigger_seo_optimization(
+    req: OptimizationRequest,
+    background_tasks: BackgroundTasks,
+    x_admin_key: str = Header(None)
+):
+    """
+    Triggers SEO optimization batch (internal links, alt text, schema).
+    """
+    if x_admin_key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    try:
+        # Generate unique batch ID
+        batch_id = str(uuid.uuid4())
+        
+        if req.run_sync:
+            # Synchronous mode (for testing, can timeout on large batches)
+            logger.warning("⚠️ Running in SYNC mode - this may timeout on large batches!")
+            run_optimization_batch(batch_id, req.batch_size, req.target_status)
+            return {
+                "status": "completed",
+                "batch_id": batch_id,
+                "message": "SEO optimization completed synchronously.",
+                "batch_size": req.batch_size
+            }
+        else:
+            # Asynchronous mode (recommended)
+            background_tasks.add_task(run_optimization_batch, batch_id, req.batch_size, req.target_status)
+            
+            return {
+                "status": "queued",
+                "batch_id": batch_id,
+                "message": f"SEO optimization started. Processing {req.batch_size} articles with status '{req.target_status}'.",
+                "batch_size": req.batch_size
+            }
+            
+    except Exception as e:
+        logger.error(f"Error triggering SEO optimization: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to trigger SEO optimization: {str(e)}")
+
+@router.get("/batch-status/{batch_id}")
+def get_batch_status(batch_id: str, x_admin_key: str = Header(None)):
+    """
+    Get the status of a specific batch.
+    """
+    if x_admin_key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    if batch_id not in batch_tracker:
+        raise HTTPException(status_code=404, detail=f"Batch {batch_id} not found")
+    
+    return batch_tracker[batch_id]
