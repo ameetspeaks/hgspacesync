@@ -27,14 +27,20 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     logger.warning("⚠️ Supabase credentials not set")
 
 if GEMINI_KEY:
-    genai.configure(api_key=GEMINI_KEY)
+    try:
+        genai.configure(api_key=GEMINI_KEY)
+    except Exception as e:
+        logger.error(f"Failed to configure Gemini: {e}")
 
 supabase: Client = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        logger.info("✅ Supabase client initialized")
     except Exception as e:
         logger.error(f"Failed to initialize Supabase client: {e}")
+else:
+    logger.warning("⚠️ Supabase credentials not configured")
 
 # --- MODELS ---
 class BatchRequest(BaseModel):
@@ -282,6 +288,16 @@ def run_content_batch(batch_size):
         logger.error(traceback.format_exc())
 
 # --- ENDPOINTS ---
+@router.get("/health")
+def health_check():
+    """Health check endpoint to verify router is loaded"""
+    return {
+        "status": "ok",
+        "router": "content_engine",
+        "supabase_configured": supabase is not None,
+        "gemini_configured": GEMINI_KEY is not None
+    }
+
 @router.post("/run-batch")
 def trigger_content_generation(
     req: BatchRequest,
