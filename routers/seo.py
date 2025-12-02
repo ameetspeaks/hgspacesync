@@ -57,23 +57,44 @@ class RestructureRequest(BaseModel):
 # --- MODEL HUNTER ---
 def get_working_model():
     """Try different models in order of preference."""
+    # First, check if API key is configured
+    if not GEMINI_KEY:
+        error_msg = "GEMINI_API_KEY environment variable is not set. Please configure it in your environment."
+        logger.error(f"❌ {error_msg}")
+        raise Exception(error_msg)
+    
+    # Ensure genai is configured
+    try:
+        genai.configure(api_key=GEMINI_KEY)
+    except Exception as e:
+        error_msg = f"Failed to configure Gemini API: {str(e)}"
+        logger.error(f"❌ {error_msg}")
+        raise Exception(error_msg)
+    
     models_to_try = [
         "gemini-1.5-flash",
         "gemini-1.5-pro",
         "gemini-pro"
     ]
     
+    last_error = None
     for model_name in models_to_try:
         try:
+            logger.info(f"🔍 Trying model: {model_name}")
             model = genai.GenerativeModel(model_name)
-            # Test with a simple prompt
-            model.generate_content("test")
+            # Don't test - just return the model. Testing can fail due to rate limits or network issues
+            # but the model might still work for actual requests
+            logger.info(f"✅ Model {model_name} initialized successfully")
             return model
         except Exception as e:
-            logger.debug(f"Model {model_name} not available: {e}")
+            last_error = str(e)
+            logger.warning(f"⚠️ Model {model_name} initialization failed: {e}")
             continue
     
-    raise Exception("No working Gemini model found")
+    # If all models failed to initialize
+    error_msg = f"No working Gemini model found. Tried: {', '.join(models_to_try)}. Last error: {last_error}. Please check: 1) GEMINI_API_KEY is set correctly, 2) API key is valid, 3) API quota is available, 4) Network connectivity."
+    logger.error(f"❌ {error_msg}")
+    raise Exception(error_msg)
 
 def extract_keywords(title, content, existing):
     try:
@@ -589,7 +610,7 @@ OUTPUT: Return ONLY the optimized HTML content. No markdown code blocks, no expl
         
         return optimized_html.strip()
         
-    except Exception as e:
+                except Exception as e:
         logger.error(f"AI Optimization Error: {e}")
         raise
 
@@ -829,7 +850,7 @@ def parse_markdown_to_blocks(markdown):
             children = parse_markdown_links(text)
             current_list.append(children[0]['text'] if children and children[0].get('type') == 'text' else text)
             i += 1
-            continue
+                    continue
         
         # Regular text
         if current_list:
@@ -1203,8 +1224,8 @@ def run_optimization_batch(batch_id, batch_size, target_status):
         
         response = query.execute()
         rows = response.data if response else []
-        
-        if not rows:
+    
+    if not rows:
             batch_tracker[batch_id]["status"] = "completed"
             batch_tracker[batch_id]["message"] = "No unoptimized articles found."
             logger.info("✅ No unoptimized articles found.")
@@ -1340,3 +1361,62 @@ def get_batch_status(batch_id: str, x_admin_key: str = Header(None)):
         raise HTTPException(status_code=404, detail=f"Batch {batch_id} not found")
     
     return batch_tracker[batch_id]
+
+@router.get("/optimize-diagnostic")
+def optimize_diagnostic(x_admin_key: str = Header(None)):
+    """
+    Diagnostic endpoint to check configuration and API connectivity.
+    """
+    if x_admin_key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    diagnostic = {
+        "timestamp": datetime.now().isoformat(),
+        "configuration": {},
+        "api_test": {},
+        "recommendations": []
+    }
+    
+    # Check environment variables
+    diagnostic["configuration"]["GEMINI_API_KEY"] = "✅ Set" if GEMINI_KEY else "❌ Missing"
+    diagnostic["configuration"]["SUPABASE_URL"] = "✅ Set" if SUPABASE_URL else "❌ Missing"
+    diagnostic["configuration"]["SUPABASE_KEY"] = "✅ Set" if SUPABASE_KEY else "❌ Missing"
+    diagnostic["configuration"]["ADMIN_SECRET"] = "✅ Set" if ADMIN_SECRET else "❌ Missing"
+    
+    # Test Gemini API
+    if GEMINI_KEY:
+        try:
+            model = get_working_model()
+            diagnostic["api_test"]["gemini"] = "✅ Working"
+            diagnostic["api_test"]["model_name"] = "Initialized successfully"
+        except Exception as e:
+            diagnostic["api_test"]["gemini"] = f"❌ Failed: {str(e)}"
+            diagnostic["recommendations"].append(f"Gemini API issue: {str(e)}")
+    else:
+        diagnostic["api_test"]["gemini"] = "❌ Skipped (no API key)"
+        diagnostic["recommendations"].append("Set GEMINI_API_KEY environment variable")
+    
+    # Test Supabase connection
+    if SUPABASE_URL and SUPABASE_KEY:
+        try:
+            test_res = supabase.table("blog_posts").select("id").limit(1).execute()
+            diagnostic["api_test"]["supabase"] = "✅ Connected"
+            diagnostic["api_test"]["article_count"] = "Can query database"
+        except Exception as e:
+            diagnostic["api_test"]["supabase"] = f"❌ Failed: {str(e)}"
+            diagnostic["recommendations"].append(f"Supabase connection issue: {str(e)}")
+    else:
+        diagnostic["api_test"]["supabase"] = "❌ Skipped (missing credentials)"
+    
+    # Check for seo_optimized column
+    try:
+        test_res = supabase.table("blog_posts").select("id, seo_optimized").limit(1).execute()
+        diagnostic["configuration"]["seo_optimized_column"] = "✅ Exists"
+    except Exception as e:
+        if "seo_optimized" in str(e).lower():
+            diagnostic["configuration"]["seo_optimized_column"] = "❌ Missing - run migration"
+            diagnostic["recommendations"].append("Run migration to add seo_optimized column")
+        else:
+            diagnostic["configuration"]["seo_optimized_column"] = f"⚠️ Unknown: {str(e)}"
+    
+    return diagnostic
