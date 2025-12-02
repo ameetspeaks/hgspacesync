@@ -166,7 +166,7 @@ SERVICE_CARDS = [
 
 def get_service_card_html(card):
     """Generate HTML for a service promotional card (responsive design)."""
-    return f'''<div style="background-color: #fef9f3; border-left: 4px solid #f97316; padding: 1rem 1.25rem; margin: 1.5rem 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); max-width: 100%;">
+    return f'''<div class="service-promo-card" style="background-color: #fef9f3; border-left: 4px solid #f97316; padding: 1rem 1.25rem; margin: 1.5rem 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); max-width: 100%;">
   <h3 style="font-size: 1.25rem; font-weight: bold; color: #1f2937; margin: 0 0 0.5rem 0; font-family: serif; line-height: 1.3;">{card['title']}</h3>
   <p style="font-size: 0.9375rem; color: #4b5563; margin: 0 0 1rem 0; line-height: 1.5;">{card['description']}</p>
   <a href="{card['url']}" style="display: inline-block; background-color: #f97316; color: white; padding: 0.625rem 1.25rem; border-radius: 6px; text-decoration: none; font-weight: 600; font-size: 0.9375rem; transition: background-color 0.2s; text-align: center;">{card['button_text']}</a>
