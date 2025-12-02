@@ -1393,14 +1393,104 @@ def trigger_seo_optimization(
 def get_batch_status(batch_id: str, x_admin_key: str = Header(None)):
     """
     Get the status of a specific batch.
+    Note: Batch tracking is in-memory and will be lost on server restart.
+    If batch not found, checks database to see if articles were processed.
     """
     if x_admin_key != ADMIN_SECRET:
         raise HTTPException(status_code=403, detail="Unauthorized")
     
-    if batch_id not in batch_tracker:
-        raise HTTPException(status_code=404, detail=f"Batch {batch_id} not found")
+    if batch_id in batch_tracker:
+        return batch_tracker[batch_id]
     
-    return batch_tracker[batch_id]
+    # Batch not in memory - check if it might have completed before server restart
+    # Check database for recently optimized articles
+    try:
+        # Check for articles optimized in the last hour (likely from this batch)
+        from datetime import datetime, timedelta
+        one_hour_ago = (datetime.now() - timedelta(hours=1)).isoformat()
+        
+        # Try to get count of recently optimized articles
+        recent_optimized = supabase.table("blog_posts")\
+            .select("id, slug, title, seo_optimized, updated_at", count="exact")\
+            .eq("seo_optimized", True)\
+            .gte("updated_at", one_hour_ago)\
+            .limit(10)\
+            .execute()
+        
+        if recent_optimized and len(recent_optimized.data) > 0:
+            return {
+                "status": "completed",
+                "batch_id": batch_id,
+                "message": "Batch not found in memory (server may have restarted), but found recently optimized articles in database.",
+                "note": "Batch tracking is in-memory and lost on server restart. Articles may have been processed successfully.",
+                "recently_optimized_count": len(recent_optimized.data),
+                "recently_optimized": recent_optimized.data[:5],  # Show first 5
+                "suggestion": "Check /api/seo/optimize-status to see overall optimization status."
+            }
+    except Exception as e:
+        logger.warning(f"Could not check database for batch status: {e}")
+    
+    # Batch not found and no recent activity
+    raise HTTPException(
+        status_code=404, 
+        detail={
+            "error": f"Batch {batch_id} not found",
+            "message": "Batch tracking is in-memory and lost on server restart. If the server restarted, batch status cannot be retrieved.",
+            "suggestion": "Check /api/seo/optimize-status to see overall optimization status, or start a new batch."
+        }
+    )
+
+@router.get("/optimize-status")
+def get_optimize_status(x_admin_key: str = Header(None)):
+    """
+    Get overall SEO optimization status across all articles.
+    """
+    if x_admin_key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    try:
+        # Get total count
+        total_res = supabase.table("blog_posts").select("id", count="exact").execute()
+        total_count = total_res.count if total_res.count else 0
+        
+        # Get optimized count
+        optimized_res = supabase.table("blog_posts")\
+            .select("id", count="exact")\
+            .eq("seo_optimized", True)\
+            .execute()
+        optimized_count = optimized_res.count if optimized_res.count else 0
+        
+        # Get unoptimized count
+        unoptimized_count = total_count - optimized_count
+        
+        # Get recently optimized (last 24 hours)
+        from datetime import datetime, timedelta
+        one_day_ago = (datetime.now() - timedelta(days=1)).isoformat()
+        recent_res = supabase.table("blog_posts")\
+            .select("id, slug, title, updated_at", count="exact")\
+            .eq("seo_optimized", True)\
+            .gte("updated_at", one_day_ago)\
+            .limit(10)\
+            .execute()
+        recent_count = recent_res.count if recent_res.count else 0
+        
+        # Calculate percentage
+        percentage = (optimized_count / total_count * 100) if total_count > 0 else 0
+        
+        return {
+            "status": "success",
+            "total_articles": total_count,
+            "optimized_articles": optimized_count,
+            "unoptimized_articles": unoptimized_count,
+            "optimization_percentage": round(percentage, 2),
+            "recently_optimized_24h": recent_count,
+            "recent_articles": recent_res.data[:5] if recent_res.data else [],
+            "active_batches": len([b for b in batch_tracker.values() if b.get("status") == "running"]),
+            "note": "Batch tracking is in-memory. Active batches will be lost on server restart."
+        }
+    except Exception as e:
+        logger.error(f"Error getting optimization status: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get optimization status: {str(e)}")
 
 @router.get("/optimize-diagnostic")
 def optimize_diagnostic(x_admin_key: str = Header(None)):
