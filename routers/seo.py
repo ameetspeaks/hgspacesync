@@ -571,18 +571,37 @@ INSTRUCTIONS:
 2. **Internal Linking:**
    - Scan the content for text that is semantically relevant to pages in the 'Link Map'
    - Wrap relevant text in <a href="/blog/slug"> tags
-   - Add 5-10 internal links naturally throughout the content
+   - Add 5-12 internal links naturally throughout the content
    - DO NOT link to the current page ({current_slug})
    - Ensure anchor text is natural and flows with the content
    - Only link when there's genuine semantic relevance
 
-3. **SEO Optimization:**
+3. **Feature Links (IMPORTANT - Add these strategically):**
+   Add contextual links to our website features when relevant:
+   - "Get Free Kundali" or "Free Kundali" or "birth chart" → Link to: <a href="/kundli">Get Free Kundali</a>
+   - "Horoscope" or "Daily Horoscope" or "astrological predictions" → Link to: <a href="/horoscope/today-horoscope">Horoscope</a>
+   - "Baby Name" or "Baby Name Generator" or "naming" → Link to: <a href="/baby-name-generator">Baby Name Generator</a>
+   - "Panchanga" or "Panchang" or "auspicious time" → Link to: <a href="/panchanga">Panchanga</a>
+   - "Sankalpa" or "New Year Resolutions" or "spiritual goals" → Link to: <a href="/sankalpa">Sankalpa</a>
+   Add 2-4 feature links naturally where they make sense contextually.
+
+4. **Social Media Backlinks (Add at the end):**
+   Add a subtle footer section with social media links before the schema:
+   <div style="margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #e5e7eb; text-align: center; font-size: 0.875rem; color: #6b7280;">
+     <p>Follow us for daily astrological insights:</p>
+     <p>
+       <a href="https://facebook.com/astrologyapp.in" target="_blank" rel="noopener noreferrer" style="margin: 0 0.5rem; color: #3b82f6; text-decoration: none;">Facebook</a> | 
+       <a href="https://instagram.com/astrologyapp.in" target="_blank" rel="noopener noreferrer" style="margin: 0 0.5rem; color: #3b82f6; text-decoration: none;">Instagram</a>
+     </p>
+   </div>
+
+5. **SEO Optimization:**
    - Ensure first paragraph is strong and keyword-rich
    - Add relevant keywords naturally throughout
    - Ensure proper heading structure (H1 → H2 → H3 hierarchy)
    - Make sure content is well-organized and readable
 
-4. **Image Optimization:**
+6. **Image Optimization:**
    - If you find <img> tags without 'alt' attributes, add descriptive, keyword-rich alt text
 
 LINK MAP (Reference Only - Use these for internal linking):
@@ -1148,13 +1167,32 @@ INPUT DATA:
 
 INSTRUCTIONS:
 1. **Internal Linking:** Scan the content. If you see text that is semantically relevant to a page in the 'Link Map', wrap it in an <a href="/blog/slug"> tag.
-   - Add 3-8 internal links max.
+   - Add 5-12 internal links naturally throughout the content.
    - Do NOT link to the current page ({current_slug}).
-   - Ensure anchor text is natural.
+   - Ensure anchor text is natural and flows with the content.
 
-2. **Image Optimization:** If you find <img> tags without 'alt' attributes, add descriptive, keyword-rich alt text.
+2. **Feature Links (IMPORTANT - Add these strategically):**
+   Add contextual links to our website features when relevant:
+   - "Get Free Kundali" or "Free Kundali" → Link to: <a href="/kundli">Get Free Kundali</a>
+   - "Horoscope" or "Daily Horoscope" → Link to: <a href="/horoscope/today-horoscope">Horoscope</a>
+   - "Baby Name" or "Baby Name Generator" → Link to: <a href="/baby-name-generator">Baby Name Generator</a>
+   - "Panchanga" or "Panchang" → Link to: <a href="/panchanga">Panchanga</a>
+   - "Sankalpa" or "New Year Resolutions" → Link to: <a href="/sankalpa">Sankalpa</a>
+   Add 2-4 feature links naturally where they make sense contextually.
 
-3. **Schema:** Append a valid <script type="application/ld+json"> block at the end with 'Article' schema.
+3. **Social Media Backlinks (Add at the end):**
+   Add a subtle footer section with social media links:
+   <div style="margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #e5e7eb; text-align: center; font-size: 0.875rem; color: #6b7280;">
+     <p>Follow us for daily astrological insights:</p>
+     <p>
+       <a href="https://facebook.com/astrologyapp.in" target="_blank" rel="noopener noreferrer" style="margin: 0 0.5rem; color: #3b82f6; text-decoration: none;">Facebook</a> | 
+       <a href="https://instagram.com/astrologyapp.in" target="_blank" rel="noopener noreferrer" style="margin: 0 0.5rem; color: #3b82f6; text-decoration: none;">Instagram</a>
+     </p>
+   </div>
+
+4. **Image Optimization:** If you find <img> tags without 'alt' attributes, add descriptive, keyword-rich alt text.
+
+5. **Schema:** Append a valid <script type="application/ld+json"> block at the end with 'Article' schema.
 
 LINK MAP (Reference Only):
 {sitemap_context[:50000]}
