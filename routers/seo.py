@@ -1223,8 +1223,8 @@ def run_optimization_batch(batch_id, batch_size, target_status):
         
         response = query.execute()
         rows = response.data if response else []
-    
-    if not rows:
+        
+        if not rows:
             batch_tracker[batch_id]["status"] = "completed"
             batch_tracker[batch_id]["message"] = "No unoptimized articles found."
             logger.info("✅ No unoptimized articles found.")
