@@ -4,6 +4,7 @@ import copy
 import time
 import uuid
 import re
+import random
 from datetime import datetime
 from typing import Dict, Optional
 import yake
@@ -110,6 +111,141 @@ def extract_keywords(title, content, existing):
 
 def count_words(text):
     return len(str(text).split()) if text else 0
+
+# --- SERVICE CARDS ---
+SERVICE_CARDS = [
+    {
+        "title": "Get Free Kundali",
+        "description": "Generate your personalized birth chart and discover your cosmic blueprint.",
+        "url": "/kundli",
+        "button_text": "Get Free Kundali"
+    },
+    {
+        "title": "Daily Horoscope",
+        "description": "Read in-depth daily horoscope predictions tailored to your zodiac sign.",
+        "url": "/horoscope/today-horoscope",
+        "button_text": "Read Horoscope"
+    },
+    {
+        "title": "Kundli Matching",
+        "description": "Check marriage compatibility and get detailed kundli matching analysis.",
+        "url": "/kundli-matching",
+        "button_text": "Match Kundli"
+    },
+    {
+        "title": "AI Astrologer Chat",
+        "description": "Chat with our AI astrologer for personalized guidance and remedies.",
+        "url": "/app/chat",
+        "button_text": "Chat Now"
+    },
+    {
+        "title": "Baby Name Generator",
+        "description": "Find the perfect name for your baby based on Vedic astrology principles.",
+        "url": "/baby-name-generator",
+        "button_text": "Generate Names"
+    },
+    {
+        "title": "Astrology Calculators",
+        "description": "Explore our astrology calculators & tools for birth chart, dasha, and more.",
+        "url": "/astrology-calculators-tools",
+        "button_text": "Explore Calculators"
+    },
+    {
+        "title": "Today's Panchanga",
+        "description": "Check today's panchanga for auspicious timings and important dates.",
+        "url": "/panchanga",
+        "button_text": "Check Panchanga"
+    },
+    {
+        "title": "Sankalpa & Resolutions",
+        "description": "Set spiritual goals and track your progress with personalized sankalpa.",
+        "url": "/sankalpa",
+        "button_text": "Start Sankalpa"
+    }
+]
+
+def get_service_card_html(card):
+    """Generate HTML for a service promotional card (responsive design)."""
+    return f'''<div style="background-color: #fef9f3; border-left: 4px solid #f97316; padding: 1rem 1.25rem; margin: 1.5rem 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); max-width: 100%;">
+  <h3 style="font-size: 1.25rem; font-weight: bold; color: #1f2937; margin: 0 0 0.5rem 0; font-family: serif; line-height: 1.3;">{card['title']}</h3>
+  <p style="font-size: 0.9375rem; color: #4b5563; margin: 0 0 1rem 0; line-height: 1.5;">{card['description']}</p>
+  <a href="{card['url']}" style="display: inline-block; background-color: #f97316; color: white; padding: 0.625rem 1.25rem; border-radius: 6px; text-decoration: none; font-weight: 600; font-size: 0.9375rem; transition: background-color 0.2s; text-align: center;">{card['button_text']}</a>
+</div>'''
+
+def insert_service_cards_randomly(html_content, max_cards=3):
+    """
+    Insert service cards randomly into HTML content.
+    Cards are NOT inserted in introduction (first 20% of content) or conclusion (last 15% of content).
+    Cards are inserted after </p>, </h2>, or </h3> tags in the middle section.
+    """
+    if not html_content or not html_content.strip():
+        return html_content
+    
+    # Select random cards (max 3)
+    selected_cards = random.sample(SERVICE_CARDS, min(max_cards, len(SERVICE_CARDS)))
+    
+    # Find all potential insertion points (after closing tags)
+    # Look for </p>, </h2>, </h3> tags (good insertion points)
+    insertion_patterns = [
+        (r'</p>', '</p>'),
+        (r'</h2>', '</h2>'),
+        (r'</h3>', '</h3>'),
+    ]
+    
+    # Find all matches with their positions
+    all_matches = []
+    for pattern, tag in insertion_patterns:
+        for match in re.finditer(pattern, html_content):
+            all_matches.append((match.end(), tag))
+    
+    if not all_matches:
+        # No good insertion points found, insert in middle
+        mid_point = len(html_content) // 2
+        cards_html = '\n'.join([get_service_card_html(card) for card in selected_cards])
+        return html_content[:mid_point] + '\n' + cards_html + '\n' + html_content[mid_point:]
+    
+    # Sort by position
+    all_matches.sort(key=lambda x: x[0])
+    
+    # Calculate safe insertion zones (avoid first 20% and last 15%)
+    total_length = len(html_content)
+    intro_end = int(total_length * 0.20)
+    conclusion_start = int(total_length * 0.85)
+    
+    # Filter to only middle section
+    safe_matches = [(pos, tag) for pos, tag in all_matches if intro_end < pos < conclusion_start]
+    
+    if not safe_matches:
+        # No safe matches, use middle section of all matches
+        mid_start = len(all_matches) // 4
+        mid_end = (3 * len(all_matches)) // 4
+        safe_matches = all_matches[mid_start:mid_end] if mid_end > mid_start else all_matches[len(all_matches)//3:2*len(all_matches)//3]
+    
+    if not safe_matches:
+        # Still no matches, use middle of content
+        mid_point = len(html_content) // 2
+        cards_html = '\n'.join([get_service_card_html(card) for card in selected_cards])
+        return html_content[:mid_point] + '\n' + cards_html + '\n' + html_content[mid_point:]
+    
+    # Select random insertion points (spread out evenly)
+    num_cards = len(selected_cards)
+    if len(safe_matches) >= num_cards:
+        # Spread cards evenly
+        step = max(1, len(safe_matches) // num_cards)
+        chosen_indices = [i * step for i in range(num_cards)]
+        chosen_points = [safe_matches[min(i, len(safe_matches)-1)] for i in chosen_indices]
+    else:
+        # Use all available points
+        chosen_points = safe_matches[:num_cards]
+    
+    # Insert cards (in reverse order to maintain positions)
+    result = html_content
+    for card, (pos, tag) in zip(reversed(selected_cards), reversed(chosen_points)):
+        card_html = get_service_card_html(card)
+        # Insert after the closing tag
+        result = result[:pos] + '\n' + card_html + '\n' + result[pos:]
+    
+    return result
 
 def extract_html_from_content(content):
     """
@@ -604,6 +740,8 @@ INSTRUCTIONS:
 6. **Image Optimization:**
    - If you find <img> tags without 'alt' attributes, add descriptive, keyword-rich alt text
 
+7. **Note:** Service promotional cards will be automatically inserted by the system in the middle section of the content. Do NOT add any promotional cards or CTAs yourself - focus on content optimization only.
+
 LINK MAP (Reference Only - Use these for internal linking):
 {sitemap_context[:50000]}
 
@@ -629,6 +767,9 @@ OUTPUT: Return ONLY the optimized HTML content. No markdown code blocks, no expl
         
         # Remove standalone brackets [text] that aren't links
         optimized_html = re.sub(r'\[([^\]]+)\](?!\()', r'\1', optimized_html)
+        
+        # Insert service promotional cards randomly (max 3, not in intro/conclusion)
+        optimized_html = insert_service_cards_randomly(optimized_html, max_cards=3)
         
         return optimized_html.strip()
     except Exception as e:
@@ -1194,6 +1335,8 @@ INSTRUCTIONS:
 
 5. **Schema:** Append a valid <script type="application/ld+json"> block at the end with 'Article' schema.
 
+6. **Note:** Service promotional cards will be automatically inserted by the system. Do NOT add any promotional cards or CTAs yourself.
+
 LINK MAP (Reference Only):
 {sitemap_context[:50000]}
 
@@ -1210,6 +1353,9 @@ OUTPUT: Return ONLY the updated HTML content. No markdown ticks, no explanations
         
         # Convert markdown-style links [text](url) to HTML <a> tags if present
         optimized_html = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', optimized_html)
+        
+        # Insert service promotional cards randomly (max 3, not in intro/conclusion)
+        optimized_html = insert_service_cards_randomly(optimized_html, max_cards=3)
         
         return optimized_html.strip()
         
