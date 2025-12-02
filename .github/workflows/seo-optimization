@@ -1,0 +1,186 @@
+name: SEO Optimization Batch
+
+on:
+  schedule:
+    # Run every 6 hours (adjust cron schedule as needed)
+    - cron: '0 */6 * * *'
+  # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      batch_size:
+        description: 'Number of articles to process per batch'
+        required: false
+        default: '10'
+        type: string
+
+jobs:
+  optimize-seo:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Validate and Prepare URL
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+        run: |
+          if [ -z "$BACKEND_URL" ]; then
+            echo "::error::BACKEND_URL secret is missing! Go to Settings > Secrets > Actions to add it."
+            exit 1
+          fi
+
+          # 1. Ensure URL starts with https://
+          if [[ "$BACKEND_URL" != http* ]]; then
+             BACKEND_URL="https://$BACKEND_URL"
+          fi
+
+          # 2. Remove trailing slash if present
+          BACKEND_URL="${BACKEND_URL%/}"
+          
+          # Save the cleaned URL to GITHUB_ENV for the next steps
+          echo "TARGET_URL=$BACKEND_URL" >> $GITHUB_ENV
+          
+          if [ -z "$ADMIN_SECRET" ]; then
+            echo "::error::ADMIN_SECRET secret is missing! Go to Settings > Secrets > Actions to add it."
+            exit 1
+          fi
+          
+          echo "BACKEND_URL=$BACKEND_URL" >> $GITHUB_ENV
+          echo "ADMIN_SECRET=$ADMIN_SECRET" >> $GITHUB_ENV
+
+      - name: Trigger SEO Optimization
+        env:
+          TARGET_URL: ${{ env.TARGET_URL }}
+          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+          BATCH_SIZE: ${{ github.event.inputs.batch_size || '10' }}
+        run: |
+          set -e
+          
+          echo "🚀 Starting SEO Optimization Batch..."
+          echo "📍 Space URL: $TARGET_URL"
+          echo "📦 Batch Size: $BATCH_SIZE"
+          
+          # Make the API call with full URL
+          response=$(curl -s -w "\n%{http_code}" -k -X POST "${TARGET_URL}/api/seo/optimize-batch" \
+            -H "Content-Type: application/json" \
+            -H "x-admin-key: ${ADMIN_SECRET}" \
+            -d "{\"batch_size\": ${BATCH_SIZE}, \"target_status\": \"completed\"}" \
+            --max-time 300 \
+            -L) || {
+            echo "::error::Failed to connect to API"
+            exit 1
+          }
+          
+          # Extract HTTP status code (last line)
+          http_code=$(echo "$response" | tail -n1)
+          # Extract response body (all but last line)
+          body=$(echo "$response" | head -n-1)
+          
+          echo "📊 Response Status: $http_code"
+          echo "📄 Response Body: $body"
+          
+          # Check if request was successful
+          if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+            echo "✅ SEO optimization batch queued successfully!"
+            
+            # Extract batch_id if available
+            if command -v jq &> /dev/null; then
+              echo "$body" | jq '.'
+              BATCH_ID=$(echo "$body" | jq -r '.batch_id // empty')
+              if [ -n "$BATCH_ID" ] && [ "$BATCH_ID" != "null" ]; then
+                echo "BATCH_ID=$BATCH_ID" >> $GITHUB_ENV
+                echo "📋 Batch ID: $BATCH_ID"
+              fi
+            else
+              echo "$body"
+              # Try to extract batch_id manually (basic parsing)
+              BATCH_ID=$(echo "$body" | grep -o '"batch_id":"[^"]*"' | cut -d'"' -f4 || echo "")
+              if [ -n "$BATCH_ID" ]; then
+                echo "BATCH_ID=$BATCH_ID" >> $GITHUB_ENV
+                echo "📋 Batch ID: $BATCH_ID"
+              fi
+            fi
+          else
+            echo "::error::Request failed with status $http_code"
+            echo "$body"
+            echo ""
+            echo "Troubleshooting:"
+            echo "1. Check if the Space is awake and running"
+            echo "2. Verify ADMIN_SECRET is correct"
+            echo "3. Check Space logs for detailed error messages"
+            exit 1
+          fi
+
+      - name: Check Batch Status (if batch_id available)
+        if: env.BATCH_ID != ''
+        env:
+          TARGET_URL: ${{ env.TARGET_URL }}
+          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+          BATCH_ID: ${{ env.BATCH_ID }}
+        run: |
+          echo "🔍 Checking batch status for: $BATCH_ID"
+          echo "⏳ Waiting 30 seconds before first check..."
+          sleep 30
+          
+          MAX_CHECKS=20  # Check up to 20 times (10 minutes total)
+          CHECK_COUNT=0
+          
+          while [ $CHECK_COUNT -lt $MAX_CHECKS ]; do
+            CHECK_COUNT=$((CHECK_COUNT + 1))
+            echo ""
+            echo "📊 Check #$CHECK_COUNT:"
+            
+            response=$(curl -s -w "\n%{http_code}" -k -X GET "${TARGET_URL}/api/seo/batch-status/${BATCH_ID}" \
+              -H "x-admin-key: ${ADMIN_SECRET}" \
+              --max-time 60 \
+              -L) || {
+              echo "⚠️ Failed to check status, will retry..."
+              sleep 30
+              continue
+            }
+            
+            http_code=$(echo "$response" | tail -n1)
+            body=$(echo "$response" | head -n-1)
+            
+            if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+              if command -v jq &> /dev/null; then
+                status=$(echo "$body" | jq -r '.status // "unknown"')
+                processed=$(echo "$body" | jq -r '.processed // 0')
+                total=$(echo "$body" | jq -r '.total // 0')
+                progress=$(echo "$body" | jq -r '.progress_percentage // 0')
+                
+                echo "Status: $status"
+                echo "Progress: $progress% ($processed/$total)"
+                
+                if [ "$status" = "completed" ] || [ "$status" = "error" ]; then
+                  echo ""
+                  echo "✅ Batch finished with status: $status"
+                  echo "$body" | jq '.'
+                  break
+                fi
+              else
+                echo "$body"
+                # Basic check for completion
+                if echo "$body" | grep -q '"status":"completed"'; then
+                  echo "✅ Batch completed!"
+                  break
+                elif echo "$body" | grep -q '"status":"error"'; then
+                  echo "❌ Batch failed!"
+                  break
+                fi
+              fi
+            else
+              echo "⚠️ Status check failed (HTTP $http_code), will retry..."
+            fi
+            
+            # Wait before next check
+            if [ $CHECK_COUNT -lt $MAX_CHECKS ]; then
+              echo "⏳ Waiting 30 seconds before next check..."
+              sleep 30
+            fi
+          done
+          
+          if [ $CHECK_COUNT -eq $MAX_CHECKS ]; then
+            echo "⏰ Reached maximum check attempts. Batch may still be running."
+            echo "Check status manually using: curl -X GET \"${TARGET_URL}/api/seo/batch-status/${BATCH_ID}\" -H \"x-admin-key: ***\""
+          fi
+
