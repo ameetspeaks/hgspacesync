@@ -609,7 +609,6 @@ OUTPUT: Return ONLY the optimized HTML content. No markdown code blocks, no expl
         optimized_html = re.sub(r'\[([^\]]+)\](?!\()', r'\1', optimized_html)
         
         return optimized_html.strip()
-        
     except Exception as e:
         logger.error(f"AI Optimization Error: {e}")
         raise
