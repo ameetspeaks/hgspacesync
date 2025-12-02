@@ -610,7 +610,7 @@ OUTPUT: Return ONLY the optimized HTML content. No markdown code blocks, no expl
         
         return optimized_html.strip()
         
-                except Exception as e:
+    except Exception as e:
         logger.error(f"AI Optimization Error: {e}")
         raise
 
