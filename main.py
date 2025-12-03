@@ -17,6 +17,7 @@ from routers.resolutions import router as res_router # <--- NEW
 from routers.names import router as names_router # <--- NEW
 from routers.calculator import router as calculator_router # <--- NEW
 from routers.content_engine import router as content_engine_router # <--- Blog Generation
+from routers.snippets import router as snippets_router # <--- Snippet Generation
 
 # --- LOGGING SETUP ---
 logging.basicConfig(level=logging.INFO)
@@ -73,10 +74,13 @@ app.include_router(calculator_router, prefix="/api/birth-chart", tags=["Calculat
 # 11. Content Engine (Automated Blog Generation)
 app.include_router(content_engine_router, prefix="/api/content", tags=["Content Engine"])
 
+# 12. Snippet Generation (Cosmic Shorts)
+app.include_router(snippets_router, prefix="/api/snippets", tags=["Snippet Generation"])
+
 @app.get("/")
 def health():
     return {
         "status": "Alive", 
         "service": "Astrology App Backend",
-        "modules": ["Horoscope", "Panchang", "Chat", "User", "Match", "Report", "Voice", "SEO", "Content Engine"]
+        "modules": ["Horoscope", "Panchang", "Chat", "User", "Match", "Report", "Voice", "SEO", "Content Engine", "Snippets"]
     }
