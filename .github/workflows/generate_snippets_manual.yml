@@ -52,20 +52,45 @@ jobs:
           LIMIT: ${{ github.event.inputs.limit || '10' }}
         run: |
           echo "🚀 Starting snippet generation on backend..."
-          response=$(curl -s -X POST "$BACKEND_URL/api/snippets/process-batch?batch_size=$LIMIT" \
+          echo "Backend URL: $BACKEND_URL"
+          echo "Batch size: $LIMIT"
+          
+          # Get response with HTTP status code
+          response=$(curl -s -w "\n%{http_code}" -X POST "$BACKEND_URL/api/snippets/process-batch?batch_size=$LIMIT" \
             -H "Content-Type: application/json" \
             -H "x-admin-key: $ADMIN_SECRET")
-          echo "$response" | jq '.'
-          echo "process_response<<EOF" >> $GITHUB_OUTPUT
-          echo "$response" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
           
-          blog_ids=$(echo "$response" | jq -r '.ids[]?' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
-          if [ -n "$blog_ids" ] && [ "$blog_ids" != "null" ]; then
-            echo "blog_ids=$blog_ids" >> $GITHUB_OUTPUT
-            echo "📝 Tracking batch with IDs: $blog_ids"
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d')
+          
+          echo "HTTP Status: $http_code"
+          echo "Response body:"
+          echo "$body"
+          
+          if [ "$http_code" -eq 200 ]; then
+            # Try to parse as JSON
+            if echo "$body" | jq . >/dev/null 2>&1; then
+              echo "$body" | jq '.'
+              echo "process_response<<EOF" >> $GITHUB_OUTPUT
+              echo "$body" >> $GITHUB_OUTPUT
+              echo "EOF" >> $GITHUB_OUTPUT
+              
+              blog_ids=$(echo "$body" | jq -r '.ids[]?' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+              if [ -n "$blog_ids" ] && [ "$blog_ids" != "null" ] && [ "$blog_ids" != "" ]; then
+                echo "blog_ids=$blog_ids" >> $GITHUB_OUTPUT
+                echo "📝 Tracking batch with IDs: $blog_ids"
+              else
+                echo "⚠️ No blog IDs returned from batch"
+                echo "Response: $body"
+              fi
+            else
+              echo "⚠️ Response is not valid JSON"
+              echo "Raw response: $body"
+            fi
           else
-            echo "⚠️ No blog IDs returned from batch"
+            echo "❌ Backend returned error (HTTP $http_code)"
+            echo "Response: $body"
+            exit 1
           fi
 
       - name: Wait and check batch status
