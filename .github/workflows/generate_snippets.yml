@@ -66,22 +66,24 @@ jobs:
           # Remove trailing slash from BACKEND_URL if present
           BACKEND_URL=$(echo "$BACKEND_URL" | sed 's|/$||')
           
-          # Get response with HTTP status code (follow redirects with -L, show redirects with -v)
-          response=$(curl -s -L -w "\n%{http_code}\n%{redirect_url}" -X POST "$BACKEND_URL/api/snippets/process-batch?batch_size=$LIMIT" \
+          # Get response with HTTP status code (follow redirects with -L)
+          temp_file=$(mktemp)
+          http_code=$(curl -s -L -w "%{http_code}" -o "$temp_file" -X POST "$BACKEND_URL/api/snippets/process-batch?batch_size=$LIMIT" \
             -H "Content-Type: application/json" \
-            -H "x-admin-key: $ADMIN_SECRET" 2>&1)
-          
-          # Extract components
-          http_code=$(echo "$response" | tail -n2 | head -n1)
-          redirect_url=$(echo "$response" | tail -n1)
-          body=$(echo "$response" | sed '$d' | sed '$d')
+            -H "x-admin-key: $ADMIN_SECRET")
+          body=$(cat "$temp_file")
+          rm -f "$temp_file"
           
           echo "HTTP Status: $http_code"
-          if [ -n "$redirect_url" ] && [ "$redirect_url" != "$http_code" ]; then
-            echo "Redirect URL: $redirect_url"
-          fi
           echo "Response body:"
           echo "$body"
+          
+          # Validate http_code is numeric
+          if ! [[ "$http_code" =~ ^[0-9]+$ ]]; then
+            echo "❌ Invalid HTTP status code: $http_code"
+            echo "Full response: $body"
+            exit 1
+          fi
           
           if [ "$http_code" -eq 200 ]; then
             # Try to parse as JSON
