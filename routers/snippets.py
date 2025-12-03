@@ -2,7 +2,7 @@ import os
 import logging
 import json
 import time
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Header
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Header, Request, Request
 from pydantic import BaseModel
 
 class BatchStatusRequest(BaseModel):
@@ -98,9 +98,34 @@ def process_blog_snippets(blog_data):
     title = blog_data.get('title', '')
     primary_keyword = blog_data.get('primary_keyword', '')
     
-    if not log_id or not blog_id:
-        logger.error(f"Missing log_id or blog_id: {blog_data}")
+    if not blog_id:
+        logger.error(f"Missing blog_id: {blog_data}")
         return
+    
+    # Create log entry if it doesn't exist
+    if not log_id:
+        logger.warning(f"No log_id found for blog {blog_id}, creating one...")
+        try:
+            # Use the database function to create a log entry
+            log_response = supabase.rpc('create_snippet_generation_log', {'p_blog_id': int(blog_id)}).execute()
+            if hasattr(log_response, 'data') and log_response.data:
+                log_id = log_response.data
+            else:
+                # Fallback: create log directly
+                log_result = supabase.table('snippet_generation_logs').insert({
+                    'blog_id': int(blog_id),
+                    'status': 'pending'
+                }).execute()
+                if hasattr(log_result, 'data') and log_result.data:
+                    log_id = log_result.data[0].get('id')
+            
+            if not log_id:
+                logger.error(f"Failed to create log entry for blog {blog_id}")
+                return
+            logger.info(f"Created log entry {log_id} for blog {blog_id}")
+        except Exception as e:
+            logger.error(f"Error creating log entry for blog {blog_id}: {e}")
+            return
     
     start_time = time.time()
     
@@ -263,25 +288,47 @@ def process_snippet_batch(
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/check-batch")
-def check_batch_status(
-    req: BatchStatusRequest,
+async def check_batch_status(
+    request: Request,
     x_admin_key: str = Header(None)
 ):
     """Check status of a batch of blogs (similar to SEO check-batch)"""
     if x_admin_key != ADMIN_SECRET:
         raise HTTPException(status_code=403, detail="Unauthorized")
     
-    # Validate and log the request
-    if not req.ids:
-        return {"total": 0, "processing": 0, "completed": 0, "failed": 0, "pending": 0, "is_done": True}
-    
-    # Ensure all IDs are integers
     try:
-        ids = [int(id) for id in req.ids]
-        logger.info(f"Checking batch status for {len(ids)} blogs: {ids[:5]}...")
-    except (ValueError, TypeError) as e:
-        logger.error(f"Invalid IDs format: {req.ids}, error: {e}")
-        raise HTTPException(status_code=422, detail=f"Invalid IDs format: {e}")
+        # Get raw request body for debugging
+        body = await request.json()
+        logger.debug(f"Received check-batch request: {body}")
+        
+        # Validate request structure
+        if not isinstance(body, dict) or 'ids' not in body:
+            logger.error(f"Invalid request structure: {body}")
+            raise HTTPException(status_code=422, detail="Request must contain 'ids' field")
+        
+        ids_raw = body.get('ids', [])
+        if not isinstance(ids_raw, list):
+            logger.error(f"IDs is not a list: {type(ids_raw)}, value: {ids_raw}")
+            raise HTTPException(status_code=422, detail="'ids' must be a list")
+        
+        # Ensure all IDs are integers
+        try:
+            ids = [int(id) for id in ids_raw]
+            logger.info(f"Checking batch status for {len(ids)} blogs: {ids[:5]}...")
+        except (ValueError, TypeError) as e:
+            logger.error(f"Invalid IDs format: {ids_raw}, error: {e}")
+            raise HTTPException(status_code=422, detail=f"All IDs must be integers: {e}")
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error: {e}")
+        raise HTTPException(status_code=422, detail=f"Invalid JSON: {e}")
+    except Exception as e:
+        logger.error(f"Error parsing request: {e}")
+        raise HTTPException(status_code=422, detail=f"Request parsing error: {e}")
+    
+    # Validate and log the request
+    if not ids:
+        return {"total": 0, "processing": 0, "completed": 0, "failed": 0, "pending": 0, "is_done": True}
     
     try:
         # Check blog statuses
