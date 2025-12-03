@@ -1,0 +1,62 @@
+name: Generate Snippets - Manual Trigger
+
+on:
+  workflow_dispatch:
+    inputs:
+      blog_ids:
+        description: 'Comma-separated blog IDs (leave empty for pending blogs)'
+        required: false
+        default: ''
+      limit:
+        description: 'Number of blogs to process (if blog_ids not provided)'
+        required: false
+        default: '10'
+
+jobs:
+  generate-snippets:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Generate snippets for specific blogs
+        if: ${{ github.event.inputs.blog_ids != '' }}
+        env:
+          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+          API_URL: ${{ secrets.API_URL || 'https://astrologyapp.in' }}
+          BLOG_IDS: ${{ github.event.inputs.blog_ids }}
+        run: |
+          # Convert comma-separated string to JSON array
+          BLOG_IDS_JSON=$(echo "[$BLOG_IDS]" | sed 's/,/,/g')
+          curl -X POST "$API_URL/api/admin/generate-snippets" \
+            -H "Content-Type: application/json" \
+            -H "x-admin-key: $ADMIN_SECRET" \
+            -d "{\"blog_ids\": $BLOG_IDS_JSON}"
+
+      - name: Generate snippets for pending blogs
+        if: ${{ github.event.inputs.blog_ids == '' }}
+        env:
+          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+          API_URL: ${{ secrets.API_URL || 'https://astrologyapp.in' }}
+          LIMIT: ${{ github.event.inputs.limit }}
+        run: |
+          curl -X POST "$API_URL/api/admin/generate-snippets" \
+            -H "Content-Type: application/json" \
+            -H "x-admin-key: $ADMIN_SECRET" \
+            -d "{\"limit\": $LIMIT}"
+
+      - name: Show results
+        env:
+          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+          API_URL: ${{ secrets.API_URL || 'https://astrologyapp.in' }}
+        run: |
+          echo "Generation completed. Statistics:"
+          response=$(curl -s -w "\n%{http_code}" -X GET "$API_URL/api/admin/snippet-stats" \
+            -H "x-admin-key: $ADMIN_SECRET")
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d')
+          if [ "$http_code" -eq 200 ]; then
+            echo "$body" | jq '.stats'
+          else
+            echo "Error: HTTP $http_code"
+            echo "$body"
+          fi
+
