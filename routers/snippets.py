@@ -296,15 +296,30 @@ async def check_batch_status(
     if x_admin_key != ADMIN_SECRET:
         raise HTTPException(status_code=403, detail="Unauthorized")
     
+    ids = []
+    
     try:
-        # Get raw request body for debugging
-        body = await request.json()
+        # Get raw request body
+        body_bytes = await request.body()
+        
+        # Handle empty body gracefully
+        if not body_bytes or len(body_bytes) == 0:
+            logger.warning("Empty request body received for check-batch")
+            return {"total": 0, "processing": 0, "completed": 0, "failed": 0, "pending": 0, "is_done": True}
+        
+        # Parse JSON
+        try:
+            body = json.loads(body_bytes.decode('utf-8'))
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error: {e}, body: {body_bytes[:200]}")
+            raise HTTPException(status_code=422, detail=f"Invalid JSON: {e}")
+        
         logger.debug(f"Received check-batch request: {body}")
         
         # Validate request structure
-        if not isinstance(body, dict) or 'ids' not in body:
-            logger.error(f"Invalid request structure: {body}")
-            raise HTTPException(status_code=422, detail="Request must contain 'ids' field")
+        if not isinstance(body, dict):
+            logger.error(f"Request is not a dict: {type(body)}, value: {body}")
+            raise HTTPException(status_code=422, detail="Request must be a JSON object")
         
         ids_raw = body.get('ids', [])
         if not isinstance(ids_raw, list):
@@ -313,15 +328,14 @@ async def check_batch_status(
         
         # Ensure all IDs are integers
         try:
-            ids = [int(id) for id in ids_raw]
+            ids = [int(id) for id in ids_raw if id is not None]
             logger.info(f"Checking batch status for {len(ids)} blogs: {ids[:5]}...")
         except (ValueError, TypeError) as e:
             logger.error(f"Invalid IDs format: {ids_raw}, error: {e}")
             raise HTTPException(status_code=422, detail=f"All IDs must be integers: {e}")
         
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON decode error: {e}")
-        raise HTTPException(status_code=422, detail=f"Invalid JSON: {e}")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error parsing request: {e}")
         raise HTTPException(status_code=422, detail=f"Request parsing error: {e}")
