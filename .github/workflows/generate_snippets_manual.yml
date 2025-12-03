@@ -49,6 +49,14 @@ jobs:
           API_URL: ${{ secrets.API_URL || 'https://astrologyapp.in' }}
         run: |
           echo "Generation completed. Statistics:"
-          curl -X GET "$API_URL/api/admin/snippet-stats" \
-            -H "x-admin-key: $ADMIN_SECRET" \
-            | jq '.stats'
+          response=$(curl -s -w "\n%{http_code}" -X GET "$API_URL/api/admin/snippet-stats" \
+            -H "x-admin-key: $ADMIN_SECRET")
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d')
+          if [ "$http_code" -eq 200 ]; then
+            echo "$body" | jq '.stats'
+          else
+            echo "Error: HTTP $http_code"
+            echo "$body"
+          fi
+
