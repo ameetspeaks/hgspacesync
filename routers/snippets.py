@@ -298,20 +298,22 @@ async def check_batch_status(
     
     ids = []
     
+    ids = []
+    
     try:
-        # Get raw request body
+        # Get raw request body first
         body_bytes = await request.body()
         
         # Handle empty body gracefully
         if not body_bytes or len(body_bytes) == 0:
-            logger.warning("Empty request body received for check-batch")
+            logger.warning("Empty request body received for check-batch - returning empty status")
             return {"total": 0, "processing": 0, "completed": 0, "failed": 0, "pending": 0, "is_done": True}
         
         # Parse JSON
         try:
             body = json.loads(body_bytes.decode('utf-8'))
         except json.JSONDecodeError as e:
-            logger.error(f"JSON decode error: {e}, body: {body_bytes[:200]}")
+            logger.error(f"JSON decode error: {e}, body preview: {body_bytes[:200]}")
             raise HTTPException(status_code=422, detail=f"Invalid JSON: {e}")
         
         logger.debug(f"Received check-batch request: {body}")
@@ -329,7 +331,8 @@ async def check_batch_status(
         # Ensure all IDs are integers
         try:
             ids = [int(id) for id in ids_raw if id is not None]
-            logger.info(f"Checking batch status for {len(ids)} blogs: {ids[:5]}...")
+            if ids:
+                logger.info(f"Checking batch status for {len(ids)} blogs: {ids[:5]}...")
         except (ValueError, TypeError) as e:
             logger.error(f"Invalid IDs format: {ids_raw}, error: {e}")
             raise HTTPException(status_code=422, detail=f"All IDs must be integers: {e}")
@@ -337,11 +340,12 @@ async def check_batch_status(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error parsing request: {e}")
+        logger.error(f"Error parsing request: {type(e).__name__}: {e}")
         raise HTTPException(status_code=422, detail=f"Request parsing error: {e}")
     
     # Validate and log the request
     if not ids:
+        logger.info("No IDs provided in request - returning empty status")
         return {"total": 0, "processing": 0, "completed": 0, "failed": 0, "pending": 0, "is_done": True}
     
     try:
