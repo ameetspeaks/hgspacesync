@@ -52,28 +52,84 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Process snippets via backend
+        id: process
         env:
           ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
           BACKEND_URL: ${{ secrets.BACKEND_URL || 'https://ameetspeaks-astrologyapp.hf.space' }}
           LIMIT: ${{ github.event.inputs.limit || '10' }}
-        id: process
         run: |
           echo "🚀 Starting snippet generation on backend..."
-          response=$(curl -s -X POST "$BACKEND_URL/api/snippets/process-batch?batch_size=$LIMIT" \
-            -H "Content-Type: application/json" \
-            -H "x-admin-key: $ADMIN_SECRET")
-          echo "$response" | jq '.'
-          echo "process_response<<EOF" >> $GITHUB_OUTPUT
-          echo "$response" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          echo "Backend URL: $BACKEND_URL"
+          echo "Batch size: $LIMIT"
+          echo "Endpoint: $BACKEND_URL/api/snippets/process-batch"
           
-          # Extract blog IDs from response
-          blog_ids=$(echo "$response" | jq -r '.ids[]?' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
-          if [ -n "$blog_ids" ] && [ "$blog_ids" != "null" ]; then
-            echo "blog_ids=$blog_ids" >> $GITHUB_OUTPUT
-            echo "📝 Tracking batch with IDs: $blog_ids"
+          # Remove trailing slash from BACKEND_URL if present
+          BACKEND_URL=$(echo "$BACKEND_URL" | sed 's|/$||')
+          
+          # Get response with HTTP status code (follow redirects with -L, show redirects with -v)
+          response=$(curl -s -L -w "\n%{http_code}\n%{redirect_url}" -X POST "$BACKEND_URL/api/snippets/process-batch?batch_size=$LIMIT" \
+            -H "Content-Type: application/json" \
+            -H "x-admin-key: $ADMIN_SECRET" 2>&1)
+          
+          # Extract components
+          http_code=$(echo "$response" | tail -n2 | head -n1)
+          redirect_url=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d' | sed '$d')
+          
+          echo "HTTP Status: $http_code"
+          if [ -n "$redirect_url" ] && [ "$redirect_url" != "$http_code" ]; then
+            echo "Redirect URL: $redirect_url"
+          fi
+          echo "Response body:"
+          echo "$body"
+          
+          if [ "$http_code" -eq 200 ]; then
+            # Try to parse as JSON
+            if echo "$body" | jq . >/dev/null 2>&1; then
+              echo "$body" | jq '.'
+              echo "process_response<<EOF" >> $GITHUB_OUTPUT
+              echo "$body" >> $GITHUB_OUTPUT
+              echo "EOF" >> $GITHUB_OUTPUT
+              
+              # Extract blog IDs from response
+              blog_ids=$(echo "$body" | jq -r '.ids[]?' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+              if [ -n "$blog_ids" ] && [ "$blog_ids" != "null" ] && [ "$blog_ids" != "" ]; then
+                echo "blog_ids=$blog_ids" >> $GITHUB_OUTPUT
+                echo "📝 Tracking batch with IDs: $blog_ids"
+              else
+                echo "⚠️ No blog IDs returned from batch"
+                echo "Response: $body"
+              fi
+            else
+              echo "⚠️ Response is not valid JSON"
+              echo "Raw response: $body"
+            fi
+          elif [ "$http_code" -eq 301 ] || [ "$http_code" -eq 302 ]; then
+            echo "⚠️ Redirect detected (HTTP $http_code)"
+            echo "Trying alternative endpoint: /api/snippets/process-pending"
+            
+            # Try alternative endpoint
+            alt_response=$(curl -s -L -w "\n%{http_code}" -X POST "$BACKEND_URL/api/snippets/process-pending?limit=$LIMIT" \
+              -H "Content-Type: application/json" \
+              -H "x-admin-key: $ADMIN_SECRET" 2>&1)
+            
+            alt_http_code=$(echo "$alt_response" | tail -n1)
+            alt_body=$(echo "$alt_response" | sed '$d')
+            
+            if [ "$alt_http_code" -eq 200 ]; then
+              echo "✅ Alternative endpoint worked!"
+              echo "$alt_body" | jq '.' 2>/dev/null || echo "$alt_body"
+            else
+              echo "❌ Alternative endpoint also failed (HTTP $alt_http_code)"
+              echo "Response: $alt_body"
+              echo "⚠️ Backend may not be deployed or endpoint path is incorrect"
+              exit 1
+            fi
           else
-            echo "⚠️ No blog IDs returned from batch"
+            echo "❌ Backend returned error (HTTP $http_code)"
+            echo "Response: $body"
+            echo "⚠️ Check if backend is deployed and endpoint exists: $BACKEND_URL/api/snippets/process-batch"
+            exit 1
           fi
 
       - name: Wait and check batch status
@@ -94,7 +150,7 @@ jobs:
             attempt=$((attempt + 1))
             echo "📊 Check attempt $attempt/$max_attempts..."
             
-            status=$(curl -s -X POST "$BACKEND_URL/api/snippets/check-batch" \
+            status=$(curl -s -L -X POST "$BACKEND_URL/api/snippets/check-batch" \
               -H "Content-Type: application/json" \
               -H "x-admin-key: $ADMIN_SECRET" \
               -d "{\"ids\": $ids_array}")
