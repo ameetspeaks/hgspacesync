@@ -113,9 +113,8 @@ jobs:
           echo "⏳ Waiting for batch processing..."
           BACKEND_URL="${BACKEND_URL%/}"
           
-          # Convert comma-separated IDs to JSON array of integers
-          # Split by comma, convert each to number, create array
-          ids_array=$(echo "$BLOG_IDS" | tr ',' '\n' | jq -R 'tonumber' | jq -s '.')
+          # Convert comma-separated IDs to JSON array of integers (compact format)
+          ids_array=$(echo "$BLOG_IDS" | jq -R -s 'split(",") | map(tonumber)')
           
           echo "📋 Checking batch with IDs: $ids_array"
           
@@ -126,8 +125,8 @@ jobs:
             attempt=$((attempt + 1))
             echo "📊 Check attempt $attempt/$max_attempts..."
             
-            # Create proper JSON payload
-            payload=$(jq -n --argjson ids "$ids_array" '{ids: $ids}')
+            # Create proper JSON payload (compact, single-line)
+            payload=$(jq -n --argjson ids "$ids_array" '{ids: $ids}' | jq -c '.')
             
             status_response=$(curl -s -L -w "\n%{http_code}" -X POST "${BACKEND_URL}/api/snippets/check-batch" \
               -H "Content-Type: application/json" \
