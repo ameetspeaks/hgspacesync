@@ -54,75 +54,44 @@ jobs:
           echo "🚀 Starting snippet generation on backend..."
           echo "Backend URL: $BACKEND_URL"
           echo "Batch size: $LIMIT"
-          echo "Endpoint: $BACKEND_URL/api/snippets/process-batch"
           
-          # Remove trailing slash from BACKEND_URL if present
-          BACKEND_URL=$(echo "$BACKEND_URL" | sed 's|/$||')
+          # Remove trailing slash if present
+          BACKEND_URL="${BACKEND_URL%/}"
           
-          # Get response with HTTP status code (follow redirects with -L)
-          temp_file=$(mktemp)
-          http_code=$(curl -s -L -w "%{http_code}" -o "$temp_file" -X POST "$BACKEND_URL/api/snippets/process-batch?batch_size=$LIMIT" \
+          # Make the API call (same pattern as other workflows)
+          response=$(curl -s -L -w "\n%{http_code}" -X POST "${BACKEND_URL}/api/snippets/process-batch?batch_size=${LIMIT}" \
             -H "Content-Type: application/json" \
-            -H "x-admin-key: $ADMIN_SECRET")
-          body=$(cat "$temp_file")
-          rm -f "$temp_file"
+            -H "x-admin-key: ${ADMIN_SECRET}" \
+            --max-time 300)
           
-          echo "HTTP Status: $http_code"
-          echo "Response body:"
-          echo "$body"
+          # Extract HTTP status code (last line)
+          http_code=$(echo "$response" | tail -n1)
+          # Extract response body (all but last line)
+          body=$(echo "$response" | head -n-1)
           
-          # Validate http_code is numeric
-          if ! [[ "$http_code" =~ ^[0-9]+$ ]]; then
-            echo "❌ Invalid HTTP status code: $http_code"
-            echo "Full response: $body"
-            exit 1
-          fi
+          echo "📊 Response Status: $http_code"
+          echo "📄 Response Body: $body"
           
-          if [ "$http_code" -eq 200 ]; then
-            # Try to parse as JSON
-            if echo "$body" | jq . >/dev/null 2>&1; then
+          # Check if request was successful
+          if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+            echo "✅ Snippet generation batch queued successfully!"
+            if command -v jq &> /dev/null; then
               echo "$body" | jq '.'
-              echo "process_response<<EOF" >> $GITHUB_OUTPUT
-              echo "$body" >> $GITHUB_OUTPUT
-              echo "EOF" >> $GITHUB_OUTPUT
-              
+            else
+              echo "$body"
+            fi
+            
+            # Extract blog IDs for tracking
+            if command -v jq &> /dev/null; then
               blog_ids=$(echo "$body" | jq -r '.ids[]?' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
               if [ -n "$blog_ids" ] && [ "$blog_ids" != "null" ] && [ "$blog_ids" != "" ]; then
                 echo "blog_ids=$blog_ids" >> $GITHUB_OUTPUT
                 echo "📝 Tracking batch with IDs: $blog_ids"
-              else
-                echo "⚠️ No blog IDs returned from batch"
-                echo "Response: $body"
               fi
-            else
-              echo "⚠️ Response is not valid JSON"
-              echo "Raw response: $body"
-            fi
-          elif [ "$http_code" -eq 301 ] || [ "$http_code" -eq 302 ]; then
-            echo "⚠️ Redirect detected (HTTP $http_code)"
-            echo "Trying alternative endpoint: /api/snippets/process-pending"
-            
-            # Try alternative endpoint
-            alt_response=$(curl -s -L -w "\n%{http_code}" -X POST "$BACKEND_URL/api/snippets/process-pending?limit=$LIMIT" \
-              -H "Content-Type: application/json" \
-              -H "x-admin-key: $ADMIN_SECRET" 2>&1)
-            
-            alt_http_code=$(echo "$alt_response" | tail -n1)
-            alt_body=$(echo "$alt_response" | sed '$d')
-            
-            if [ "$alt_http_code" -eq 200 ]; then
-              echo "✅ Alternative endpoint worked!"
-              echo "$alt_body" | jq '.' 2>/dev/null || echo "$alt_body"
-            else
-              echo "❌ Alternative endpoint also failed (HTTP $alt_http_code)"
-              echo "Response: $alt_body"
-              echo "⚠️ Backend may not be deployed or endpoint path is incorrect"
-              exit 1
             fi
           else
-            echo "❌ Backend returned error (HTTP $http_code)"
-            echo "Response: $body"
-            echo "⚠️ Check if backend is deployed and endpoint exists: $BACKEND_URL/api/snippets/process-batch"
+            echo "::error::Request failed with status $http_code"
+            echo "$body"
             exit 1
           fi
 
@@ -132,8 +101,11 @@ jobs:
           ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
           BACKEND_URL: ${{ secrets.BACKEND_URL || 'https://ameetspeaks-astrologyapp.hf.space' }}
           BLOG_IDS: ${{ steps.process.outputs.blog_ids }}
+        continue-on-error: true
         run: |
           echo "⏳ Waiting for batch processing..."
+          BACKEND_URL="${BACKEND_URL%/}"
+          
           # Convert comma-separated IDs to JSON array
           ids_array=$(echo "$BLOG_IDS" | tr ',' '\n' | jq -R . | jq -s .)
           
@@ -144,17 +116,21 @@ jobs:
             attempt=$((attempt + 1))
             echo "📊 Check attempt $attempt/$max_attempts..."
             
-            status=$(curl -s -L -X POST "$BACKEND_URL/api/snippets/check-batch" \
+            status_response=$(curl -s -L -w "\n%{http_code}" -X POST "${BACKEND_URL}/api/snippets/check-batch" \
               -H "Content-Type: application/json" \
-              -H "x-admin-key: $ADMIN_SECRET" \
+              -H "x-admin-key: ${ADMIN_SECRET}" \
               -d "{\"ids\": $ids_array}")
             
-            echo "$status" | jq '.'
+            status_http_code=$(echo "$status_response" | tail -n1)
+            status_body=$(echo "$status_response" | head -n-1)
             
-            is_done=$(echo "$status" | jq -r '.is_done')
-            if [ "$is_done" = "true" ]; then
-              echo "✅ Batch processing completed!"
-              break
+            if [ "$status_http_code" -eq 200 ]; then
+              echo "$status_body" | jq '.'
+              is_done=$(echo "$status_body" | jq -r '.is_done')
+              if [ "$is_done" = "true" ]; then
+                echo "✅ Batch processing completed!"
+                break
+              fi
             fi
             
             if [ $attempt -lt $max_attempts ]; then
@@ -162,10 +138,6 @@ jobs:
               sleep 30
             fi
           done
-          
-          if [ "$is_done" != "true" ]; then
-            echo "⚠️ Batch still processing after $max_attempts attempts."
-          fi
 
       - name: Show results
         env:
@@ -177,27 +149,7 @@ jobs:
           response=$(curl -s -w "\n%{http_code}" -X GET "$API_URL/api/admin/snippet-stats" \
             -H "x-admin-key: $ADMIN_SECRET")
           http_code=$(echo "$response" | tail -n1)
-          body=$(echo "$response" | sed '$d')
-          if [ "$http_code" -eq 200 ]; then
-            echo "✅ Statistics:"
-            echo "$body" | jq '.stats'
-          else
-            echo "⚠️ Warning: Could not fetch statistics (HTTP $http_code)"
-            echo "Note: The API route may not be deployed yet or needs rebuild"
-            echo "Snippet generation was queued successfully"
-          fi
-
-      - name: Show results
-        env:
-          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
-          API_URL: ${{ secrets.API_URL || 'https://astrologyapp.in' }}
-        continue-on-error: true
-        run: |
-          echo "Generation completed. Fetching statistics..."
-          response=$(curl -s -w "\n%{http_code}" -X GET "$API_URL/api/admin/snippet-stats" \
-            -H "x-admin-key: $ADMIN_SECRET")
-          http_code=$(echo "$response" | tail -n1)
-          body=$(echo "$response" | sed '$d')
+          body=$(echo "$response" | head -n-1)
           if [ "$http_code" -eq 200 ]; then
             echo "✅ Statistics:"
             echo "$body" | jq '.stats'
