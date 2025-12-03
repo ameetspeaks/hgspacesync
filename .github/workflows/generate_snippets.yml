@@ -34,16 +34,85 @@ jobs:
             -H "x-admin-key: $ADMIN_SECRET" \
             -d '{"limit": null}'
 
-      - name: Generate snippets
+      - name: Queue blogs for processing
         env:
           ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
           API_URL: ${{ secrets.API_URL || 'https://astrologyapp.in' }}
           LIMIT: ${{ github.event.inputs.limit || '10' }}
+        id: queue
         run: |
-          curl -X POST "$API_URL/api/admin/generate-snippets" \
+          echo "📋 Queueing blogs for snippet generation..."
+          response=$(curl -s -X POST "$API_URL/api/admin/generate-snippets" \
             -H "Content-Type: application/json" \
             -H "x-admin-key: $ADMIN_SECRET" \
-            -d "{\"limit\": $LIMIT, \"force\": false}"
+            -d "{\"limit\": $LIMIT, \"force\": false}")
+          echo "$response" | jq '.'
+          echo "queued_response<<EOF" >> $GITHUB_OUTPUT
+          echo "$response" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Process snippets via backend
+        env:
+          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+          BACKEND_URL: ${{ secrets.BACKEND_URL || 'https://ameetspeaks-astrologyapp.hf.space' }}
+          LIMIT: ${{ github.event.inputs.limit || '10' }}
+        id: process
+        run: |
+          echo "🚀 Starting snippet generation on backend..."
+          response=$(curl -s -X POST "$BACKEND_URL/api/snippets/process-batch?batch_size=$LIMIT" \
+            -H "Content-Type: application/json" \
+            -H "x-admin-key: $ADMIN_SECRET")
+          echo "$response" | jq '.'
+          echo "process_response<<EOF" >> $GITHUB_OUTPUT
+          echo "$response" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          # Extract blog IDs from response
+          blog_ids=$(echo "$response" | jq -r '.ids[]?' | tr '\n' ',' | sed 's/,$//')
+          if [ -n "$blog_ids" ]; then
+            echo "blog_ids=$blog_ids" >> $GITHUB_OUTPUT
+            echo "📝 Tracking batch with IDs: $blog_ids"
+          fi
+
+      - name: Wait and check batch status
+        if: steps.process.outputs.blog_ids != ''
+        env:
+          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+          BACKEND_URL: ${{ secrets.BACKEND_URL || 'https://ameetspeaks-astrologyapp.hf.space' }}
+          BLOG_IDS: ${{ steps.process.outputs.blog_ids }}
+        run: |
+          echo "⏳ Waiting for batch processing..."
+          ids_array=$(echo "$BLOG_IDS" | tr ',' ' ' | xargs -I {} echo '{}' | jq -R . | jq -s .)
+          
+          max_attempts=30
+          attempt=0
+          
+          while [ $attempt -lt $max_attempts ]; do
+            attempt=$((attempt + 1))
+            echo "📊 Check attempt $attempt/$max_attempts..."
+            
+            status=$(curl -s -X POST "$BACKEND_URL/api/snippets/check-batch" \
+              -H "Content-Type: application/json" \
+              -H "x-admin-key: $ADMIN_SECRET" \
+              -d "{\"ids\": $ids_array}")
+            
+            echo "$status" | jq '.'
+            
+            is_done=$(echo "$status" | jq -r '.is_done')
+            if [ "$is_done" = "true" ]; then
+              echo "✅ Batch processing completed!"
+              break
+            fi
+            
+            if [ $attempt -lt $max_attempts ]; then
+              echo "⏸️ Waiting 30 seconds before next check..."
+              sleep 30
+            fi
+          done
+          
+          if [ "$is_done" != "true" ]; then
+            echo "⚠️ Batch still processing after $max_attempts attempts. Check backend logs."
+          fi
 
       - name: Get statistics
         env:
