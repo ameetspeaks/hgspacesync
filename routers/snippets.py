@@ -4,6 +4,9 @@ import json
 import time
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Header
 from pydantic import BaseModel
+
+class BatchStatusRequest(BaseModel):
+    ids: list[int]
 from supabase import create_client, Client
 import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
@@ -214,4 +217,75 @@ def process_pending_snippets_background(
     
     background_tasks.add_task(run_snippet_batch_worker, limit)
     return {"status": "started", "message": f"Processing up to {limit} blogs in background"}
+
+@router.post("/process-batch")
+def process_snippet_batch(
+    batch_size: int = 10,
+    background_tasks: BackgroundTasks = None,
+    x_admin_key: str = Header(None)
+):
+    """Process a batch of pending blogs (similar to SEO rewrite-batch)"""
+    if x_admin_key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    # Get pending blogs
+    try:
+        response = supabase.rpc('get_blogs_pending_snippets', {'p_limit': batch_size}).execute()
+        blogs = response.data if hasattr(response, 'data') else []
+        
+        if not blogs:
+            return {"status": "Done", "message": "No pending blogs.", "ids": []}
+        
+        blog_ids = [b.get('blog_id') or b.get('id') for b in blogs if b.get('blog_id') or b.get('id')]
+        
+        # Lock them as processing
+        supabase.table('blog_posts').update({
+            'snippet_generation_status': 'processing'
+        }).in_('id', blog_ids).execute()
+        
+        # Start background processing
+        background_tasks.add_task(run_snippet_batch_worker, batch_size)
+        
+        return {
+            "status": "Job Started",
+            "ids": blog_ids,
+            "message": f"Processing {len(blog_ids)} blog(s)",
+            "count": len(blog_ids)
+        }
+    except Exception as e:
+        logger.error(f"Error starting batch: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/check-batch")
+def check_batch_status(
+    req: BatchStatusRequest,
+    x_admin_key: str = Header(None)
+):
+    """Check status of a batch of blogs (similar to SEO check-batch)"""
+    if x_admin_key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    if not req.ids:
+        return {"total": 0, "processing": 0, "completed": 0, "failed": 0, "pending": 0, "is_done": True}
+    
+    try:
+        # Check blog statuses
+        res = supabase.table('blog_posts').select('id, snippet_generation_status').in_('id', req.ids).execute()
+        
+        processing = sum(1 for r in res.data if r.get('snippet_generation_status') == 'processing')
+        completed = sum(1 for r in res.data if r.get('snippet_generation_status') == 'completed')
+        failed = sum(1 for r in res.data if r.get('snippet_generation_status') == 'failed')
+        pending = sum(1 for r in res.data if r.get('snippet_generation_status') == 'pending')
+        
+        return {
+            "total": len(req.ids),
+            "processing": processing,
+            "completed": completed,
+            "failed": failed,
+            "pending": pending,
+            "is_done": processing == 0 and pending == 0
+        }
+    except Exception as e:
+        logger.error(f"Error checking batch status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
