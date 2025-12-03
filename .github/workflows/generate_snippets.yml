@@ -114,7 +114,10 @@ jobs:
           BACKEND_URL="${BACKEND_URL%/}"
           
           # Convert comma-separated IDs to JSON array of integers
-          ids_array=$(echo "[$BLOG_IDS]" | jq 'map(tonumber)')
+          # Split by comma, convert each to number, create array
+          ids_array=$(echo "$BLOG_IDS" | tr ',' '\n' | jq -R 'tonumber' | jq -s '.')
+          
+          echo "📋 Checking batch with IDs: $ids_array"
           
           max_attempts=20
           attempt=0
@@ -123,10 +126,13 @@ jobs:
             attempt=$((attempt + 1))
             echo "📊 Check attempt $attempt/$max_attempts..."
             
+            # Create proper JSON payload
+            payload=$(jq -n --argjson ids "$ids_array" '{ids: $ids}')
+            
             status_response=$(curl -s -L -w "\n%{http_code}" -X POST "${BACKEND_URL}/api/snippets/check-batch" \
               -H "Content-Type: application/json" \
               -H "x-admin-key: ${ADMIN_SECRET}" \
-              -d "{\"ids\": $ids_array}")
+              -d "$payload")
             
             status_http_code=$(echo "$status_response" | tail -n1)
             status_body=$(echo "$status_response" | head -n-1)
