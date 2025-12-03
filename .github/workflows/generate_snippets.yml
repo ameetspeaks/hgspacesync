@@ -49,16 +49,18 @@ jobs:
         env:
           ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
           API_URL: ${{ secrets.API_URL || 'https://astrologyapp.in' }}
+        continue-on-error: true
         run: |
           response=$(curl -s -w "\n%{http_code}" -X GET "$API_URL/api/admin/snippet-stats" \
             -H "x-admin-key: $ADMIN_SECRET")
           http_code=$(echo "$response" | tail -n1)
           body=$(echo "$response" | sed '$d')
           if [ "$http_code" -eq 200 ]; then
+            echo "✅ Statistics retrieved:"
             echo "$body" | jq '.'
           else
-            echo "Error: HTTP $http_code"
-            echo "$body"
-            exit 1
+            echo "⚠️ Warning: Could not fetch statistics (HTTP $http_code)"
+            echo "This is not critical - snippet generation may still be processing"
+            echo "Response preview: $(echo "$body" | head -c 200)"
           fi
 
