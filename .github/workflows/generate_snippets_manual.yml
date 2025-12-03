@@ -106,8 +106,8 @@ jobs:
           echo "⏳ Waiting for batch processing..."
           BACKEND_URL="${BACKEND_URL%/}"
           
-          # Convert comma-separated IDs to JSON array
-          ids_array=$(echo "$BLOG_IDS" | tr ',' '\n' | jq -R . | jq -s .)
+          # Convert comma-separated IDs to JSON array of integers
+          ids_array=$(echo "[$BLOG_IDS]" | jq 'map(tonumber)')
           
           max_attempts=20
           attempt=0
