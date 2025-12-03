@@ -1,0 +1,55 @@
+name: Generate Snippets from Blogs
+
+on:
+  schedule:
+    # Run every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    # Manual trigger
+    inputs:
+      limit:
+        description: 'Number of blogs to process'
+        required: false
+        default: '10'
+      force:
+        description: 'Force regeneration'
+        required: false
+        default: 'false'
+
+jobs:
+  generate-snippets:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Queue existing blogs
+        env:
+          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+          API_URL: ${{ secrets.API_URL || 'https://astrologyapp.in' }}
+        run: |
+          curl -X POST "$API_URL/api/admin/queue-existing-blogs" \
+            -H "Content-Type: application/json" \
+            -H "x-admin-key: $ADMIN_SECRET" \
+            -d '{"limit": null}'
+
+      - name: Generate snippets
+        env:
+          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+          API_URL: ${{ secrets.API_URL || 'https://astrologyapp.in' }}
+          LIMIT: ${{ github.event.inputs.limit || '10' }}
+        run: |
+          curl -X POST "$API_URL/api/admin/generate-snippets" \
+            -H "Content-Type: application/json" \
+            -H "x-admin-key: $ADMIN_SECRET" \
+            -d "{\"limit\": $LIMIT, \"force\": false}"
+
+      - name: Get statistics
+        env:
+          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+          API_URL: ${{ secrets.API_URL || 'https://astrologyapp.in' }}
+        run: |
+          curl -X GET "$API_URL/api/admin/snippet-stats" \
+            -H "x-admin-key: $ADMIN_SECRET" \
+            | jq '.'
