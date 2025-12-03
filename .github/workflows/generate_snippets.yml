@@ -68,21 +68,24 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
           
           # Extract blog IDs from response
-          blog_ids=$(echo "$response" | jq -r '.ids[]?' | tr '\n' ',' | sed 's/,$//')
-          if [ -n "$blog_ids" ]; then
+          blog_ids=$(echo "$response" | jq -r '.ids[]?' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+          if [ -n "$blog_ids" ] && [ "$blog_ids" != "null" ]; then
             echo "blog_ids=$blog_ids" >> $GITHUB_OUTPUT
             echo "📝 Tracking batch with IDs: $blog_ids"
+          else
+            echo "⚠️ No blog IDs returned from batch"
           fi
 
       - name: Wait and check batch status
-        if: steps.process.outputs.blog_ids != ''
+        if: steps.process.outputs.blog_ids != '' && steps.process.outputs.blog_ids != 'null'
         env:
           ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
           BACKEND_URL: ${{ secrets.BACKEND_URL || 'https://ameetspeaks-astrologyapp.hf.space' }}
           BLOG_IDS: ${{ steps.process.outputs.blog_ids }}
         run: |
           echo "⏳ Waiting for batch processing..."
-          ids_array=$(echo "$BLOG_IDS" | tr ',' ' ' | xargs -I {} echo '{}' | jq -R . | jq -s .)
+          # Convert comma-separated IDs to JSON array
+          ids_array=$(echo "$BLOG_IDS" | tr ',' '\n' | jq -R . | jq -s .)
           
           max_attempts=30
           attempt=0
