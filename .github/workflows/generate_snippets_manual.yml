@@ -52,20 +52,47 @@ jobs:
           LIMIT: ${{ github.event.inputs.limit || '10' }}
         run: |
           echo "🚀 Starting snippet generation on backend..."
-          response=$(curl -s -X POST "$BACKEND_URL/api/snippets/process-batch?batch_size=$LIMIT" \
-            -H "Content-Type: application/json" \
-            -H "x-admin-key: $ADMIN_SECRET")
-          echo "$response" | jq '.'
-          echo "process_response<<EOF" >> $GITHUB_OUTPUT
-          echo "$response" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          echo "Backend URL: $BACKEND_URL"
+          echo "Batch size: $LIMIT"
           
-          blog_ids=$(echo "$response" | jq -r '.ids[]?' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
-          if [ -n "$blog_ids" ] && [ "$blog_ids" != "null" ]; then
-            echo "blog_ids=$blog_ids" >> $GITHUB_OUTPUT
-            echo "📝 Tracking batch with IDs: $blog_ids"
+          # Remove trailing slash if present
+          BACKEND_URL="${BACKEND_URL%/}"
+          
+          # Make the API call (same pattern as other workflows)
+          response=$(curl -s -L -w "\n%{http_code}" -X POST "${BACKEND_URL}/api/snippets/process-batch?batch_size=${LIMIT}" \
+            -H "Content-Type: application/json" \
+            -H "x-admin-key: ${ADMIN_SECRET}" \
+            --max-time 300)
+          
+          # Extract HTTP status code (last line)
+          http_code=$(echo "$response" | tail -n1)
+          # Extract response body (all but last line)
+          body=$(echo "$response" | head -n-1)
+          
+          echo "📊 Response Status: $http_code"
+          echo "📄 Response Body: $body"
+          
+          # Check if request was successful
+          if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+            echo "✅ Snippet generation batch queued successfully!"
+            if command -v jq &> /dev/null; then
+              echo "$body" | jq '.'
+            else
+              echo "$body"
+            fi
+            
+            # Extract blog IDs for tracking
+            if command -v jq &> /dev/null; then
+              blog_ids=$(echo "$body" | jq -r '.ids[]?' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+              if [ -n "$blog_ids" ] && [ "$blog_ids" != "null" ] && [ "$blog_ids" != "" ]; then
+                echo "blog_ids=$blog_ids" >> $GITHUB_OUTPUT
+                echo "📝 Tracking batch with IDs: $blog_ids"
+              fi
+            fi
           else
-            echo "⚠️ No blog IDs returned from batch"
+            echo "::error::Request failed with status $http_code"
+            echo "$body"
+            exit 1
           fi
 
       - name: Wait and check batch status
@@ -74,10 +101,15 @@ jobs:
           ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
           BACKEND_URL: ${{ secrets.BACKEND_URL || 'https://ameetspeaks-astrologyapp.hf.space' }}
           BLOG_IDS: ${{ steps.process.outputs.blog_ids }}
+        continue-on-error: true
         run: |
           echo "⏳ Waiting for batch processing..."
-          # Convert comma-separated IDs to JSON array
-          ids_array=$(echo "$BLOG_IDS" | tr ',' '\n' | jq -R . | jq -s .)
+          BACKEND_URL="${BACKEND_URL%/}"
+          
+          # Convert comma-separated IDs to JSON array of integers (compact format)
+          ids_array=$(echo "$BLOG_IDS" | jq -R -s 'split(",") | map(tonumber)')
+          
+          echo "📋 Checking batch with IDs: $ids_array"
           
           max_attempts=20
           attempt=0
@@ -86,17 +118,24 @@ jobs:
             attempt=$((attempt + 1))
             echo "📊 Check attempt $attempt/$max_attempts..."
             
-            status=$(curl -s -X POST "$BACKEND_URL/api/snippets/check-batch" \
+            # Create proper JSON payload (compact, single-line)
+            payload=$(jq -n --argjson ids "$ids_array" '{ids: $ids}' | jq -c '.')
+            
+            status_response=$(curl -s -L -w "\n%{http_code}" -X POST "${BACKEND_URL}/api/snippets/check-batch" \
               -H "Content-Type: application/json" \
-              -H "x-admin-key: $ADMIN_SECRET" \
-              -d "{\"ids\": $ids_array}")
+              -H "x-admin-key: ${ADMIN_SECRET}" \
+              -d "$payload")
             
-            echo "$status" | jq '.'
+            status_http_code=$(echo "$status_response" | tail -n1)
+            status_body=$(echo "$status_response" | head -n-1)
             
-            is_done=$(echo "$status" | jq -r '.is_done')
-            if [ "$is_done" = "true" ]; then
-              echo "✅ Batch processing completed!"
-              break
+            if [ "$status_http_code" -eq 200 ]; then
+              echo "$status_body" | jq '.'
+              is_done=$(echo "$status_body" | jq -r '.is_done')
+              if [ "$is_done" = "true" ]; then
+                echo "✅ Batch processing completed!"
+                break
+              fi
             fi
             
             if [ $attempt -lt $max_attempts ]; then
@@ -104,10 +143,6 @@ jobs:
               sleep 30
             fi
           done
-          
-          if [ "$is_done" != "true" ]; then
-            echo "⚠️ Batch still processing after $max_attempts attempts."
-          fi
 
       - name: Show results
         env:
@@ -119,27 +154,7 @@ jobs:
           response=$(curl -s -w "\n%{http_code}" -X GET "$API_URL/api/admin/snippet-stats" \
             -H "x-admin-key: $ADMIN_SECRET")
           http_code=$(echo "$response" | tail -n1)
-          body=$(echo "$response" | sed '$d')
-          if [ "$http_code" -eq 200 ]; then
-            echo "✅ Statistics:"
-            echo "$body" | jq '.stats'
-          else
-            echo "⚠️ Warning: Could not fetch statistics (HTTP $http_code)"
-            echo "Note: The API route may not be deployed yet or needs rebuild"
-            echo "Snippet generation was queued successfully"
-          fi
-
-      - name: Show results
-        env:
-          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
-          API_URL: ${{ secrets.API_URL || 'https://astrologyapp.in' }}
-        continue-on-error: true
-        run: |
-          echo "Generation completed. Fetching statistics..."
-          response=$(curl -s -w "\n%{http_code}" -X GET "$API_URL/api/admin/snippet-stats" \
-            -H "x-admin-key: $ADMIN_SECRET")
-          http_code=$(echo "$response" | tail -n1)
-          body=$(echo "$response" | sed '$d')
+          body=$(echo "$response" | head -n-1)
           if [ "$http_code" -eq 200 ]; then
             echo "✅ Statistics:"
             echo "$body" | jq '.stats'
