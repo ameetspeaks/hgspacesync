@@ -117,17 +117,23 @@ def process_blog_snippets(blog_data):
         
         # Insert snippets
         if snippets:
-            snippet_payload = [{
-                'blog_id': blog_id,
-                'title': s.get('title', 'Astrology Tip'),
-                'question': s.get('question', ''),
-                'answer': s.get('answer', ''),
-                'theme_color': s.get('theme', 'purple'),
-                'icon': s.get('icon', '✨')
-            } for s in snippets]
+            snippet_payload = []
+            for s in snippets:
+                snippet_payload.append({
+                    'blog_id': int(blog_id),  # Ensure it's an integer
+                    'title': str(s.get('title', 'Astrology Tip')).strip(),
+                    'question': str(s.get('question', '')).strip(),
+                    'answer': str(s.get('answer', '')).strip(),
+                    'theme_color': str(s.get('theme', 'purple')).strip(),
+                    'icon': str(s.get('icon', '✨')).strip()
+                })
             
-            supabase.table('content_snippets').insert(snippet_payload).execute()
-            logger.info(f"✅ Created {len(snippets)} snippets for blog {blog_id}")
+            if snippet_payload:
+                result = supabase.table('content_snippets').insert(snippet_payload).execute()
+                logger.info(f"✅ Created {len(snippet_payload)} snippets for blog {blog_id}")
+                logger.debug(f"Snippet IDs created: {[r.get('id') for r in (result.data if hasattr(result, 'data') else [])]}")
+            else:
+                logger.warning(f"⚠️ No valid snippets to insert for blog {blog_id}")
         else:
             logger.warning(f"⚠️ No snippets extracted for blog {blog_id}")
         
@@ -265,12 +271,21 @@ def check_batch_status(
     if x_admin_key != ADMIN_SECRET:
         raise HTTPException(status_code=403, detail="Unauthorized")
     
+    # Validate and log the request
     if not req.ids:
         return {"total": 0, "processing": 0, "completed": 0, "failed": 0, "pending": 0, "is_done": True}
     
+    # Ensure all IDs are integers
+    try:
+        ids = [int(id) for id in req.ids]
+        logger.info(f"Checking batch status for {len(ids)} blogs: {ids[:5]}...")
+    except (ValueError, TypeError) as e:
+        logger.error(f"Invalid IDs format: {req.ids}, error: {e}")
+        raise HTTPException(status_code=422, detail=f"Invalid IDs format: {e}")
+    
     try:
         # Check blog statuses
-        res = supabase.table('blog_posts').select('id, snippet_generation_status').in_('id', req.ids).execute()
+        res = supabase.table('blog_posts').select('id, snippet_generation_status').in_('id', ids).execute()
         
         processing = sum(1 for r in res.data if r.get('snippet_generation_status') == 'processing')
         completed = sum(1 for r in res.data if r.get('snippet_generation_status') == 'completed')
@@ -278,7 +293,7 @@ def check_batch_status(
         pending = sum(1 for r in res.data if r.get('snippet_generation_status') == 'pending')
         
         return {
-            "total": len(req.ids),
+            "total": len(ids),
             "processing": processing,
             "completed": completed,
             "failed": failed,
