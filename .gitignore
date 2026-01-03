@@ -1,3 +1,4 @@
 .github/workflows/README.md
 .github/workflows/seo_optimization.yml
 BATCH_TRACKING.md
+*.md

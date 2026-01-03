@@ -2,6 +2,20 @@
 
 This document explains how to use the **Smart SEO Polisher** system that adds internal links, image alt text, and JSON-LD schema to your 800+ blog articles.
 
+## Quick Start - Check Status
+
+**Check overall optimization progress:**
+```bash
+curl -X GET "https://ameetspeaks-astrologyapp.hf.space/api/seo/optimize-status" \
+     -H "x-admin-key: YOUR_SECRET"
+```
+
+**Check specific article:**
+```bash
+curl -X GET "https://ameetspeaks-astrologyapp.hf.space/api/seo/optimize-status/123" \
+     -H "x-admin-key: YOUR_SECRET"
+```
+
 ## Overview
 
 The SEO optimization system uses **Gemini AI** with its massive context window to:
@@ -49,13 +63,15 @@ x-admin-key: YOUR_ADMIN_SECRET
 ```json
 {
   "batch_size": 5,
-  "target_status": "completed"
+  "target_status": "completed",
+  "run_sync": false
 }
 ```
 
 **Parameters:**
 - `batch_size` (int, default: 5): Number of articles to process per batch
 - `target_status` (string, default: "completed"): Only optimize articles with this rewrite_status
+- `run_sync` (bool, default: false): If true, runs synchronously and returns immediate results. **Use only for testing with small batches (1-3 articles)** as it can timeout on larger batches.
 
 ### Response
 
@@ -187,24 +203,114 @@ done
 
 ## Monitoring Progress
 
-### Check Unoptimized Articles
+### Method 1: API Endpoints (Recommended)
+
+#### Get Overall Status
+
+Check the overall optimization progress across all articles:
+
+```bash
+curl -X GET "https://ameetspeaks-astrologyapp.hf.space/api/seo/optimize-status" \
+     -H "x-admin-key: YOUR_SECRET"
+```
+
+**Response:**
+```json
+{
+  "total_articles": 800,
+  "optimized": 245,
+  "unoptimized": 555,
+  "optimization_percentage": 30.63,
+  "ready_for_optimization": 555,
+  "note": "seo_optimized column exists"
+}
+```
+
+#### Get Status for Specific Article
+
+Check if a specific article has been optimized:
+
+```bash
+curl -X GET "https://ameetspeaks-astrologyapp.hf.space/api/seo/optimize-status/123" \
+     -H "x-admin-key: YOUR_SECRET"
+```
+
+**Response:**
+```json
+{
+  "id": 123,
+  "slug": "article-slug",
+  "title": "Article Title",
+  "seo_optimized": true,
+  "rewrite_status": "completed",
+  "last_updated": "2025-01-15T10:30:00Z",
+  "is_ready": false
+}
+```
+
+#### Python Example
+
+```python
+import requests
+
+url = "https://ameetspeaks-astrologyapp.hf.space/api/seo/optimize-status"
+headers = {"x-admin-key": "YOUR_SECRET"}
+
+response = requests.get(url, headers=headers)
+status = response.json()
+
+print(f"Total Articles: {status['total_articles']}")
+print(f"Optimized: {status['optimized']}")
+print(f"Unoptimized: {status['unoptimized']}")
+print(f"Progress: {status['optimization_percentage']}%")
+```
+
+#### JavaScript Example
+
+```javascript
+const response = await fetch('https://ameetspeaks-astrologyapp.hf.space/api/seo/optimize-status', {
+  headers: {
+    'x-admin-key': 'YOUR_SECRET'
+  }
+});
+
+const status = await response.json();
+console.log(`Progress: ${status.optimization_percentage}% (${status.optimized}/${status.total_articles})`);
+```
+
+### Method 2: SQL Queries (Direct Database)
+
+#### Check Overall Status
 
 ```sql
-SELECT COUNT(*) 
+-- Total articles
+SELECT COUNT(*) as total_articles FROM blog_posts;
+
+-- Optimized articles
+SELECT COUNT(*) as optimized 
+FROM blog_posts 
+WHERE seo_optimized = TRUE;
+
+-- Unoptimized articles (ready for optimization)
+SELECT COUNT(*) as unoptimized 
 FROM blog_posts 
 WHERE seo_optimized = FALSE 
 AND rewrite_status = 'completed';
+
+-- Optimization progress percentage
+SELECT 
+  COUNT(*) FILTER (WHERE seo_optimized = TRUE) as optimized,
+  COUNT(*) FILTER (WHERE seo_optimized = FALSE AND rewrite_status = 'completed') as unoptimized,
+  COUNT(*) as total,
+  ROUND(
+    COUNT(*) FILTER (WHERE seo_optimized = TRUE)::numeric / 
+    NULLIF(COUNT(*), 0) * 100, 
+    2
+  ) as optimization_percentage
+FROM blog_posts;
 ```
 
-### Check Optimized Articles
-
-```sql
-SELECT COUNT(*) 
-FROM blog_posts 
-WHERE seo_optimized = TRUE;
-```
-
-### View Recent Optimizations
+#### View Recent Optimizations
 
 ```sql
 SELECT id, slug, title, seo_optimized, updated_at
@@ -212,6 +318,31 @@ FROM blog_posts
 WHERE seo_optimized = TRUE
 ORDER BY updated_at DESC
 LIMIT 10;
+```
+
+#### Find Articles Ready for Optimization
+
+```sql
+SELECT id, slug, title, rewrite_status
+FROM blog_posts
+WHERE rewrite_status = 'completed'
+AND (seo_optimized = FALSE OR seo_optimized IS NULL)
+ORDER BY id
+LIMIT 20;
+```
+
+#### Check Specific Article
+
+```sql
+SELECT 
+  id, 
+  slug, 
+  title, 
+  seo_optimized, 
+  rewrite_status, 
+  updated_at
+FROM blog_posts
+WHERE id = 123;  -- Replace with your article ID
 ```
 
 ## Features
@@ -242,6 +373,34 @@ The system includes:
 
 ## Troubleshooting
 
+### Task Queued But No Articles Optimized
+
+If the task is queued successfully but no articles are being optimized:
+
+1. **Run Diagnostic Endpoint:**
+   ```bash
+   curl -X GET "https://ameetspeaks-astrologyapp.hf.space/api/seo/optimize-diagnostic" \
+        -H "x-admin-key: YOUR_SECRET"
+   ```
+   This shows database state, article counts, and recommendations.
+
+2. **Test Synchronously (for debugging):**
+   ```bash
+   curl -X POST "https://ameetspeaks-astrologyapp.hf.space/api/seo/optimize-batch" \
+        -H "Content-Type: application/json" \
+        -H "x-admin-key: YOUR_SECRET" \
+        -d '{"batch_size": 1, "run_sync": true}'
+   ```
+   This runs immediately and shows errors. Use small batch_size (1-3) for testing.
+
+3. **Check Common Issues:**
+   - Articles must have `rewrite_status = 'completed'` first
+   - Run `/api/seo/rewrite-batch` if articles aren't rewritten yet
+   - Check Hugging Face Space logs for detailed error messages
+   - Verify `seo_optimized` column exists (run migration if needed)
+
+See `TROUBLESHOOTING.md` for detailed troubleshooting guide.
+
 ### Column Doesn't Exist Error
 
 If you see errors about `seo_optimized` column:
@@ -254,6 +413,7 @@ If no articles are returned:
 - Check that articles have `rewrite_status = 'completed'`
 - Verify the `target_status` parameter matches your data
 - Check if all articles are already optimized (`seo_optimized = TRUE`)
+- Run diagnostic endpoint to see detailed breakdown
 
 ### API Rate Limits
 
