@@ -18,6 +18,7 @@ from routers.names import router as names_router # <--- NEW
 from routers.calculator import router as calculator_router # <--- NEW
 from routers.content_engine import router as content_engine_router # <--- Blog Generation
 from routers.snippets import router as snippets_router # <--- Snippet Generation
+from routers.kundali import router as kundali_router   # <--- Kundali Storage & PDF
 
 # --- LOGGING SETUP ---
 logging.basicConfig(level=logging.INFO)
@@ -76,6 +77,9 @@ app.include_router(content_engine_router, prefix="/api/content", tags=["Content 
 
 # 12. Snippet Generation (Cosmic Shorts)
 app.include_router(snippets_router, prefix="/api/snippets", tags=["Snippet Generation"])
+
+# 13. Kundali Storage + PDF (NEW — does not affect any existing routes)
+app.include_router(kundali_router, prefix="/api/kundali", tags=["Kundali Storage"])
 
 @app.get("/")
 def health():
